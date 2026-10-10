@@ -1,13 +1,16 @@
 import { convertFileSrc, invoke, isTauri } from "@tauri-apps/api/core";
-import { useStore } from "../store";
-import type { Clip, ProjectSettings } from "../types";
-import { cancelProxy, refreshFfmpegStatus, restoreMedia, type SavedMedia } from "./media";
+import { defaultTracks, uid, useStore } from "../store";
+import type { Clip, ProjectSettings, Track } from "../types";
+import { cancelProxy, kindOf, refreshFfmpegStatus, restoreMedia, type SavedMedia } from "./media";
+import { defaultBase, emptyKeyframes } from "./props";
+import { clipDuration } from "./timeline";
 import { resetHistory, withoutHistory } from "./history";
 import { ask, confirmUnsaved, projectName } from "./dialog";
 import { requestNewProject } from "../components/NewProjectDialog";
 
 const FORMAT = "video-cutting-bruh";
-const VERSION = 1;
+/** 2: multi-track timeline (tracks, clip start/trackId/linkId, audio fades). */
+const VERSION = 2;
 export const PROJECT_EXT = "vcbproj";
 const AUTOSAVE_INTERVAL_MS = 15_000;
 const RECENT_KEY = "vcb.recentProjects";
@@ -18,6 +21,7 @@ interface ProjectFile {
   version: number;
   settings: ProjectSettings;
   media: SavedMedia[];
+  tracks: Track[];
   clips: Clip[];
   view: { zoom: number; currentTime: number };
   /** Only in autosaves: which file the work belongs to. */
@@ -36,6 +40,7 @@ function serialize(includePath = false): string {
     version: VERSION,
     settings: s.settings,
     media: s.media.map((m) => ({ id: m.id, path: m.path, name: m.name })),
+    tracks: s.tracks,
     clips: s.clips,
     view: { zoom: s.zoom, currentTime: s.currentTime },
     ...(includePath ? { projectPath: s.projectPath } : {}),
@@ -43,13 +48,47 @@ function serialize(includePath = false): string {
   return JSON.stringify(data, null, 2);
 }
 
-function parse(text: string): ProjectFile {
+export function parse(text: string): ProjectFile {
   const data = JSON.parse(text) as Partial<ProjectFile>;
   if (data.format !== FORMAT || !Array.isArray(data.media) || !Array.isArray(data.clips)) {
     throw new Error("Not a video-cutting-bruh project file");
   }
   if ((data.version ?? 0) > VERSION) throw new Error("This project was saved by a newer version of the app");
-  return data as ProjectFile;
+  return migrate(data as ProjectFile);
+}
+
+/** Version 1 had a single sequential track; lay its clips out end to end on V1 (+ linked audio on A1). */
+function migrate(data: ProjectFile): ProjectFile {
+  const fill = (c: Partial<Clip>): Clip =>
+    ({
+      linkId: null,
+      fadeIn: 0,
+      fadeOut: 0,
+      transitionIn: { type: "cut", duration: 1 },
+      ...c,
+      base: { ...defaultBase(), ...c.base },
+      keyframes: { ...emptyKeyframes(), ...c.keyframes },
+    }) as Clip;
+
+  if ((data.version ?? 1) >= 2 && Array.isArray(data.tracks)) {
+    return { ...data, clips: data.clips.map(fill) };
+  }
+  const tracks = defaultTracks();
+  const [video, audio] = tracks;
+  const kinds = new Map(data.media.map((m) => [m.id, kindOf(m.path)]));
+  const clips: Clip[] = [];
+  let cursor = 0;
+  for (const old of data.clips) {
+    const c = fill({ ...old, trackId: video.id, start: cursor });
+    cursor += clipDuration(c);
+    if (kinds.get(c.mediaId) === "video") {
+      c.linkId = uid();
+      clips.push(c, fill({ ...c, id: uid(), trackId: audio.id, transitionIn: { type: "cut", duration: 1 }, keyframes: emptyKeyframes(), base: defaultBase() }));
+    } else {
+      clips.push(c);
+    }
+  }
+  return { ...data, version: VERSION, tracks, clips };
 }
 
 function cancelRunningProxies() {
@@ -73,6 +112,7 @@ async function applyProject(data: ProjectFile | null, path: string | null, dirty
       useStore.setState({
         media: [],
         clips: [],
+        tracks: data?.tracks?.length ? data.tracks : defaultTracks(),
         selection: null,
         playing: false,
         currentTime: 0,
@@ -315,7 +355,12 @@ export function installProjectLifecycle(): () => void {
   cleanups.push(
     useStore.subscribe((s, prev) => {
       if (loading || s.dirty) return;
-      if (s.clips !== prev.clips || s.settings !== prev.settings || (s.media !== prev.media && mediaKey(s) !== mediaKey(prev))) {
+      if (
+        s.clips !== prev.clips ||
+        s.tracks !== prev.tracks ||
+        s.settings !== prev.settings ||
+        (s.media !== prev.media && mediaKey(s) !== mediaKey(prev))
+      ) {
         useStore.setState({ dirty: true });
       }
     }),

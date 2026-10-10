@@ -1,73 +1,162 @@
-import type { Clip } from "../types";
-
-export interface PlacedClip {
-  clip: Clip;
-  index: number;
-  /** Timeline start/end in seconds. */
-  start: number;
-  end: number;
-  duration: number;
-  /** Effective (clamped) transition overlap with the previous clip. */
-  transIn: number;
-}
-
-export interface Layout {
-  items: PlacedClip[];
-  total: number;
-}
-
-export const clipDuration = (c: Clip) => Math.max(0, c.trimOut - c.trimIn);
+import type { Clip, Track, TrackKind } from "../types";
 
 /**
- * Lays clips out sequentially on a single track. A transition makes the
- * incoming clip overlap the tail of the previous one. Overlaps are clamped to
- * half of either clip, so no more than two clips are ever visible at once.
+ * Multi-track timeline helpers.
+ *
+ * Clips sit at an absolute `start` on a track; gaps are allowed and clips on
+ * the same track never overlap. A transition belongs to the clip *after* a cut:
+ * when two clips touch on a track, `clip.transitionIn` blends from the previous
+ * one, centred on the cut (each side borrows up to half the transition from
+ * beyond its trim points, holding the edge frame if the source runs out).
  */
-export function layoutClips(clips: Clip[]): Layout {
-  const items: PlacedClip[] = [];
-  let cursor = 0;
-  clips.forEach((clip, index) => {
-    const duration = clipDuration(clip);
-    const prev = items[index - 1];
-    let transIn = 0;
-    if (prev && clip.transitionIn.type !== "cut") {
-      transIn = Math.max(0, Math.min(clip.transitionIn.duration, prev.duration / 2, duration / 2));
-    }
-    const start = Math.max(0, cursor - transIn);
-    const end = start + duration;
-    items.push({ clip, index, start, end, duration, transIn });
-    cursor = end;
-  });
-  return { items, total: cursor };
+
+/** Two clips closer than this are considered touching. */
+export const TOUCH_EPS = 1 / 240;
+export const MIN_CLIP = 0.1;
+
+export const clipDuration = (c: Clip) => Math.max(0, c.trimOut - c.trimIn);
+export const clipEnd = (c: Clip) => c.start + clipDuration(c);
+
+export const timelineEnd = (clips: Clip[]) => clips.reduce((m, c) => Math.max(m, clipEnd(c)), 0);
+
+export const trackClips = (clips: Clip[], trackId: string) =>
+  clips.filter((c) => c.trackId === trackId).sort((a, b) => a.start - b.start);
+
+/** The clip ending exactly where `clip` starts on the same track, if any. */
+export function prevAdjacent(clips: Clip[], clip: Clip): Clip | undefined {
+  return clips.find((c) => c.trackId === clip.trackId && c.id !== clip.id && Math.abs(clipEnd(c) - clip.start) < TOUCH_EPS);
 }
 
-export interface Frame {
+/** Effective transition length into `clip` (0 if none or not touching a previous clip). */
+export function transitionLength(clips: Clip[], clip: Clip): number {
+  if (clip.transitionIn.type === "cut") return 0;
+  const prev = prevAdjacent(clips, clip);
+  if (!prev) return 0;
+  return Math.max(0, Math.min(clip.transitionIn.duration, clipDuration(prev), clipDuration(clip)));
+}
+
+export interface TrackFrame {
   /** Clip on top (or the only clip). */
-  current?: PlacedClip;
+  current?: Clip;
   /** Outgoing clip while a transition is running. */
-  outgoing?: PlacedClip;
+  outgoing?: Clip;
   /** 0..1 progress of the transition into `current`. */
   progress: number;
 }
 
-export function frameAt(layout: Layout, t: number): Frame {
-  const active = layout.items.filter((p) => t >= p.start && t < p.end);
-  if (active.length === 0) {
-    // Hold the very last frame when parked at the end.
-    const last = layout.items[layout.items.length - 1];
-    if (last && t >= last.end && t <= last.end + 1e-6) return { current: last, progress: 1 };
-    return { progress: 1 };
+/** What a single track shows at time `t`. */
+export function trackFrameAt(clips: Clip[], trackId: string, t: number): TrackFrame {
+  const list = trackClips(clips, trackId);
+  for (let i = 0; i < list.length; i++) {
+    const c = list[i];
+    const next = list[i + 1];
+    // Transition window around the cut into `next`.
+    if (next) {
+      const d = transitionLength(clips, next);
+      if (d > 0 && t >= next.start - d / 2 && t < next.start + d / 2) {
+        return { current: next, outgoing: c, progress: (t - (next.start - d / 2)) / d };
+      }
+    }
+    if (t >= c.start && t < clipEnd(c)) return { current: c, progress: 1 };
   }
-  const current = active[active.length - 1];
-  const outgoing = active.length > 1 ? active[active.length - 2] : undefined;
-  const progress = outgoing && current.transIn > 0 ? (t - current.start) / current.transIn : 1;
-  return { current, outgoing, progress: Math.min(1, Math.max(0, progress)) };
+  return { progress: 1 };
 }
 
-/** Topmost clip under `t`. */
-export function clipAt(layout: Layout, t: number): PlacedClip | undefined {
-  return frameAt(layout, t).current;
+/**
+ * Time range during which a clip's media must be playing: its own span,
+ * widened by any transitions it takes part in.
+ */
+export function activeRange(clips: Clip[], clip: Clip): [number, number] {
+  let from = clip.start;
+  let to = clipEnd(clip);
+  const dIn = transitionLength(clips, clip);
+  if (dIn > 0) from -= dIn / 2;
+  const next = clips.find((c) => c.trackId === clip.trackId && c.id !== clip.id && Math.abs(c.start - to) < TOUCH_EPS);
+  if (next) {
+    const dOut = transitionLength(clips, next);
+    if (dOut > 0) to += dOut / 2;
+  }
+  return [from, to];
 }
+
+// ---- Placement ------------------------------------------------------------------------
+
+/** Free gaps on a track (ignoring `exclude`), as [from, to] with `to` possibly Infinity. */
+export function gaps(clips: Clip[], trackId: string, exclude: Set<string>): [number, number][] {
+  const list = trackClips(clips, trackId).filter((c) => !exclude.has(c.id));
+  const out: [number, number][] = [];
+  let cursor = 0;
+  for (const c of list) {
+    if (c.start > cursor + TOUCH_EPS) out.push([cursor, c.start]);
+    cursor = Math.max(cursor, clipEnd(c));
+  }
+  out.push([cursor, Infinity]);
+  return out;
+}
+
+/**
+ * Closest start ≥ 0 to `desired` where a clip of `duration` fits on the track
+ * without overlapping anything (except clips in `exclude`).
+ */
+export function fitStart(clips: Clip[], trackId: string, desired: number, duration: number, exclude: Set<string>): number {
+  let best = Math.max(0, desired);
+  let bestDist = Infinity;
+  for (const [from, to] of gaps(clips, trackId, exclude)) {
+    if (to - from < duration - TOUCH_EPS) continue;
+    const s = Math.min(Math.max(desired, from), to - duration);
+    const dist = Math.abs(s - desired);
+    if (dist < bestDist) {
+      bestDist = dist;
+      best = s;
+    }
+  }
+  return Math.max(0, best);
+}
+
+/** Does [start, start+duration) fit on the track without overlaps? */
+export function fits(clips: Clip[], trackId: string, start: number, duration: number, exclude: Set<string>): boolean {
+  if (start < -TOUCH_EPS) return false;
+  return !clips.some(
+    (c) => c.trackId === trackId && !exclude.has(c.id) && start < clipEnd(c) - TOUCH_EPS && start + duration > c.start + TOUCH_EPS,
+  );
+}
+
+/**
+ * Snaps `t` to the nearest point (clip edges on any track, the playhead, 0)
+ * within `threshold` seconds. Returns the snapped value and what it snapped to.
+ */
+export function snapPoints(clips: Clip[], exclude: Set<string>, playhead: number): number[] {
+  const pts = [0, playhead];
+  for (const c of clips) {
+    if (exclude.has(c.id)) continue;
+    pts.push(c.start, clipEnd(c));
+  }
+  return pts;
+}
+
+export function snap(t: number, points: number[], threshold: number): { t: number; to: number | null } {
+  let best: number | null = null;
+  let bestD = threshold;
+  for (const p of points) {
+    const d = Math.abs(p - t);
+    if (d <= bestD) {
+      bestD = d;
+      best = p;
+    }
+  }
+  return best === null ? { t, to: null } : { t: best, to: best };
+}
+
+// ---- Tracks -----------------------------------------------------------------------------
+
+/** Display order: video tracks top-down (highest first), then audio tracks. */
+export function orderedTracks(tracks: Track[]): Track[] {
+  const v = tracks.filter((t) => t.kind === "video").reverse();
+  const a = tracks.filter((t) => t.kind === "audio");
+  return [...v, ...a];
+}
+
+export const tracksOfKind = (tracks: Track[], kind: TrackKind) => tracks.filter((t) => t.kind === kind);
 
 export function formatTime(t: number, fps: number): string {
   const total = Math.max(0, t);

@@ -4,7 +4,11 @@ A cross-platform (Windows / macOS / Linux) video editor built with Tauri 2 + Rea
 
 ## Features (so far)
 
-- **Drag & drop import.** Drop on the timeline to append clips, or anywhere else to add files to the media bin. Supports mp4, mov, m4v, webm and mkv.
+- **Drag & drop import** of videos (mp4, mov, m4v, webm, mkv) and still images (png, jpg, webp, gif, bmp, avif). Drop on the timeline to append clips, or anywhere else to add files to the media bin. Images become 5 s clips you can trim to any length.
+- **Media bin:**
+  - Files are grouped by type: *Needs attention* (missing or unplayable), *HDR video*, *Video* and *Images*. You can filter by type with the chips, search by name, sort by date added, name, length or file size, and collapse groups.
+  - Three views: **Thumbnails**, **List** and **Details** (a table of length, resolution, format, color, file size and usage). The view choice is remembered.
+  - Drag items onto the timeline to insert them at a specific spot (Esc cancels), or double-click / **+** to append.
 - **HDR detection + "Allow HDR" toggle.** Each file is probed in Rust with no ffmpeg needed. The probe reads the MP4/MOV `colr`/`hvcC`/`dvcC`/`mdcv` boxes and the Matroska `Colour` elements, and classifies the file as HDR10 (PQ), HLG or Dolby Vision. HDR clips, such as phone footage shot with HDR on, are rejected unless **Allow HDR** is enabled. With it on, the preview canvas uses `display-p3` where the webview supports it.
 - **Preview proxies (optional ffmpeg).** If ffmpeg is installed, the app converts files the system webview can't play into an H.264 preview copy (a proxy), e.g. HEVC on Windows without the HEVC extension. HDR clips get one too, tone-mapped properly to SDR.
   - **Quality:** full source resolution by default, or 1080p / 720p, up to 60 fps, with the bitrate capped by resolution.
@@ -14,12 +18,19 @@ A cross-platform (Windows / macOS / Linux) video editor built with Tauri 2 + Rea
   - Install ffmpeg: `winget install Gyan.FFmpeg` · `brew install ffmpeg` · `sudo apt install ffmpeg`
   - The app also checks the usual install folders (winget, scoop, choco, Homebrew), because GUI apps don't always see the shell `PATH`. To point it at a specific install, set `VCB_FFMPEG_DIR`.
   - With ffprobe installed, HDR is also detected when it's only declared inside the video stream, as NVIDIA ShadowPlay does.
-- **Transitions:** crossfade, dip to black, wipe left/right, slide left/up, iris. Click ⧉ between two clips to add one, then pick the type and duration in the inspector.
-- **Keyframes:** position X/Y, scale, rotation and opacity, with linear, ease in/out/in-out and hold easing.
+- **Multi-track timeline:**
+  - **Tracks:** video tracks (V1, V2…; higher ones are drawn on top) and audio tracks (A1, A2…; mixed together). Each track can be hidden, muted, soloed (audio), locked or deleted. Add tracks with **+ Video / + Audio**, or by dropping onto the "new track" strip that appears while dragging.
+  - **Free placement:** clips start wherever you drop them, and gaps play as black and silence. Clips on one track never overlap; a drop that would overlap slides to the nearest free gap. Drag up or down to move a clip to another track of the same kind.
+  - **Snapping:** clips snap to other clip edges, the playhead and 0. Toggle it with ⊞, or hold Alt (⌥) while dragging.
+  - **Trimming:** dragging an edge trims the clip. Dragging it back restores the trimmed footage, up to the length of the source file; stills can be stretched to any length.
+  - **Linked audio:** a video with sound becomes a video clip and an audio clip, linked (⛓). Linked clips move, trim, split and delete together. If the audio's track is busy, the audio moves to another audio track with room. Use **Unlink** in the inspector to edit them separately, or Shift+Delete to remove just one.
+  - **Audio clips:** keyframeable volume, fade-in and fade-out (drag the handles at the top corners), plus track mute and solo. Audio files (mp3, wav, m4a, aac, flac, ogg, opus) can be imported too.
+- **Transitions:** crossfade, dip to black, wipe left/right, slide left/up, iris. They apply where two clips touch on a video track (click ⧉ on the cut) and are centred on the cut, using footage beyond each clip's trim points where the file has it.
+- **Keyframes:** position X/Y, scale, rotation and opacity (video) and volume (audio), with linear, ease in/out/in-out and hold easing.
   - Click ◆ to keyframe a property at the playhead.
   - Once a property has keyframes, editing its value writes a keyframe.
   - You can drag the preview to move the selected clip.
-- **Editing:** reorder by dragging, trim by dragging clip edges, split at the playhead (`S`).
+- **Editing:** split at the playhead (`S`): the selected clip and its link, or everything under the playhead. Duplicate (Ctrl/⌘+D), delete (Del).
 
 - **Projects:** New / Open / Save / Save As (`.vcbproj`, JSON), plus recent projects in the File menu and on the start screen.
   - **New project…** creates a folder for the project:
@@ -76,6 +87,7 @@ src/
   lib/keyframes.ts     interpolation + easing
   lib/props.ts         registry of animatable properties  ← add new keyframeable props here
   lib/transitions.ts   transition renderers               ← add new transitions here
+  lib/mediaDrag.ts     dragging media from the bin onto the timeline (pointer-based)
   lib/media.ts         import pipeline (Tauri paths / browser files), proxies, project media restore, relink
   lib/project.ts       project files, recents, dirty tracking, autosave/recovery, close guard, window title
   lib/history.ts       undo/redo (watches clip edits, coalesces gestures)
@@ -89,7 +101,7 @@ src-tauri/src/
   ffmpeg.rs            optional ffmpeg: locate binaries, ffprobe colour fallback, proxy encoding + cancel
 ```
 
-The timeline is one track. A transition makes the incoming clip overlap the previous clip's tail, clamped to half of the shorter clip, so at most two clips are visible at any moment.
+The timeline has any number of video and audio tracks. Clips have an absolute `start`, and clips on the same track never overlap. A transition belongs to the clip after a cut: when two clips touch, it blends them over a window centred on the cut. Video tracks are composited bottom-up, and audio tracks are mixed (clip volume × fades × mute/solo). Projects saved in format v1 (single track) are converted when opened.
 
 ## Cross-platform notes
 

@@ -1,6 +1,16 @@
 import { useStore } from "../store";
-import { layoutClips, formatTime, type PlacedClip } from "../lib/timeline";
-import { PROPS, type PropDef } from "../lib/props";
+import { clipDuration, clipEnd, formatTime, transitionLength } from "../lib/timeline";
+import { propsFor, type PropDef } from "../lib/props";
+import type { Clip, Track } from "../types";
+
+/** The selected clip with its derived timing and track. */
+interface Placed {
+  clip: Clip;
+  track: Track;
+  start: number;
+  end: number;
+  duration: number;
+}
 import { EASINGS, keyframeNear, valueAt } from "../lib/keyframes";
 import { TRANSITIONS } from "../lib/transitions";
 import { hdrLabel } from "../lib/media";
@@ -48,7 +58,11 @@ export function Inspector() {
 function InspectorBody() {
   const selection = useStore((s) => s.selection);
   const clips = useStore((s) => s.clips);
-  const placed = selection ? layoutClips(clips).items.find((p) => p.clip.id === selection.clipId) : undefined;
+  const tracks = useStore((s) => s.tracks);
+  const clip = selection ? clips.find((c) => c.id === selection.clipId) : undefined;
+  const track = clip && tracks.find((t) => t.id === clip.trackId);
+  const placed: Placed | undefined =
+    clip && track ? { clip, track, start: clip.start, end: clipEnd(clip), duration: clipDuration(clip) } : undefined;
 
   return (
     <>
@@ -76,8 +90,9 @@ function InspectorBody() {
   );
 }
 
-function TransitionInspector({ placed }: { placed: PlacedClip }) {
+function TransitionInspector({ placed }: { placed: Placed }) {
   const setTransition = useStore((s) => s.setTransition);
+  const transIn = useStore((s) => transitionLength(s.clips, placed.clip));
   const { type, duration } = placed.clip.transitionIn;
   return (
     <>
@@ -106,19 +121,29 @@ function TransitionInspector({ placed }: { placed: PlacedClip }) {
           value={duration}
           disabled={type === "cut"}
           onChange={(e) => setTransition(placed.clip.id, { duration: Number(e.target.value) })}
-          {...tip("How long the two clips overlap. The transition can be at most half as long as the shorter clip, so the timeline gets shorter by this amount.")}
+          {...tip("Length of the blend, centred on the cut. It can't be longer than either clip.")}
         />
         <span className="value">{duration.toFixed(2)}s</span>
       </div>
-      {type !== "cut" && placed.transIn < duration - 1e-3 && (
-        <p className="muted small">Limited to {placed.transIn.toFixed(2)}s (half the length of the shorter clip).</p>
+      {type !== "cut" && transIn < duration - 1e-3 && (
+        <p className="muted small">
+          {transIn > 0
+            ? `Limited to ${transIn.toFixed(2)}s (the length of the shorter clip).`
+            : "The clips no longer touch, so this transition is inactive. Move them together again to use it."}
+        </p>
       )}
+      <p className="muted small">The transition is centred on the cut: each clip runs on for half its length past the cut, using extra footage beyond its trim point where available.</p>
     </>
   );
 }
 
-function ClipInspector({ placed }: { placed: PlacedClip }) {
-  const { clip } = placed;
+function ClipInspector({ placed }: { placed: Placed }) {
+  const { clip, track } = placed;
+  const isAudio = track.kind === "audio";
+  // Select a number, not a new array: zustand selectors must return stable values.
+  const linkedCount = useStore((s) => (clip.linkId ? s.clips.filter((c) => c.linkId === clip.linkId && c.id !== clip.id).length : 0));
+  const unlinkClip = useStore((s) => s.unlinkClip);
+  const setFades = useStore((s) => s.setFades);
   const media = useStore((s) => s.media.find((m) => m.id === clip.mediaId));
   const currentTime = useStore((s) => s.currentTime);
   const fps = useStore((s) => s.settings.fps);
@@ -131,9 +156,25 @@ function ClipInspector({ placed }: { placed: PlacedClip }) {
 
   return (
     <>
-      <div className="panel-title">Clip</div>
+      <div className="panel-title">{isAudio ? "Audio clip" : media?.kind === "image" ? "Image clip" : "Video clip"} · {track.name}</div>
       <div className="clip-name">{media?.name}</div>
-      {p && (
+      <dl className="stats">
+        <dt>Starts at</dt>
+        <dd>{formatTime(placed.start, fps)}</dd>
+        <dt>Length</dt>
+        <dd>{formatTime(placed.duration, fps)}</dd>
+      </dl>
+      {clip.linkId && (
+        <div className="link-row">
+          <span className="muted small" {...tip("Linked clips move, trim, split and delete together. Shift+Delete removes only this one.")}>
+            ⛓ Linked with its {isAudio ? "video" : "audio"}{linkedCount > 1 ? ` (${linkedCount})` : ""}
+          </span>
+          <button onClick={() => unlinkClip(clip.id)} {...tip(`Separate the ${isAudio ? "audio from its video" : "video from its audio"} so each can be moved and trimmed on its own`)}>
+            Unlink
+          </button>
+        </div>
+      )}
+      {p && !isAudio && (
         <div className="media-info small">
           <span>{p.container.toUpperCase()}</span>
           {p.videoCodec && <span>{p.videoCodec}</span>}
@@ -148,7 +189,7 @@ function ClipInspector({ placed }: { placed: PlacedClip }) {
         </div>
       )}
 
-      <div className="section-title" {...tip("Which part of the source file this clip uses, in seconds. You can also drag the clip's left/right edges on the timeline.")}>
+      <div className="section-title" {...tip("Which part of the source file this clip uses, in seconds. Dragging the clip's edges on the timeline does the same — drag back out to restore trimmed footage.")}>
         Trim
       </div>
       <div className="field">
@@ -176,8 +217,38 @@ function ClipInspector({ placed }: { placed: PlacedClip }) {
         <span className="value">s</span>
       </div>
 
+      {isAudio && (
+        <>
+          <div className="section-title">Fades</div>
+          <div className="field">
+            <label>Fade in</label>
+            <input
+              type="number"
+              min={0}
+              step={0.1}
+              value={clip.fadeIn.toFixed(2)}
+              onChange={(e) => setFades(clip.id, { fadeIn: Number(e.target.value) })}
+              {...tip("Seconds to fade up from silence. You can also drag the small handle at the clip's top-left on the timeline.")}
+            />
+            <span className="value">s</span>
+          </div>
+          <div className="field">
+            <label>Fade out</label>
+            <input
+              type="number"
+              min={0}
+              step={0.1}
+              value={clip.fadeOut.toFixed(2)}
+              onChange={(e) => setFades(clip.id, { fadeOut: Number(e.target.value) })}
+              {...tip("Seconds to fade down to silence at the end. You can also drag the handle at the clip's top-right.")}
+            />
+            <span className="value">s</span>
+          </div>
+        </>
+      )}
+
       <div className="section-title">
-        Transform
+        {isAudio ? "Volume" : "Transform"}
         <span
           className="muted small"
           {...tip(
@@ -189,7 +260,7 @@ function ClipInspector({ placed }: { placed: PlacedClip }) {
           {inside ? `@ ${formatTime(local, fps)} in clip` : "playhead outside clip"}
         </span>
       </div>
-      {PROPS.map((def) => (
+      {propsFor(track.kind).map((def) => (
         <PropRow key={def.key} def={def} placed={placed} local={local} />
       ))}
 
@@ -198,11 +269,15 @@ function ClipInspector({ placed }: { placed: PlacedClip }) {
       <div className="inspector-actions">
         <button
           onClick={() => resetTransform(clip.id)}
-          {...tip("Remove all keyframes and reset position, scale, rotation and opacity to their defaults. Undo restores them.")}
+          {...tip(isAudio ? "Remove volume keyframes and fades. Undo restores them." : "Remove all keyframes and reset position, scale, rotation and opacity to their defaults. Undo restores them.")}
         >
-          Reset transform
+          {isAudio ? "Reset audio" : "Reset transform"}
         </button>
-        <button className="danger" onClick={() => removeClip(clip.id)} {...tip("Remove this clip from the timeline (the file stays in the media bin)", { kbd: "Del" })}>
+        <button
+          className="danger"
+          onClick={() => removeClip(clip.id)}
+          {...tip(`Remove this clip${clip.linkId ? " and its linked clip" : ""} from the timeline (the file stays in the media bin). Shift+Delete removes only this one.`, { kbd: "Del" })}
+        >
           Delete clip
         </button>
       </div>
@@ -210,7 +285,7 @@ function ClipInspector({ placed }: { placed: PlacedClip }) {
   );
 }
 
-function PropRow({ def, placed, local }: { def: PropDef; placed: PlacedClip; local: number }) {
+function PropRow({ def, placed, local }: { def: PropDef; placed: Placed; local: number }) {
   const { clip } = placed;
   const fps = useStore((s) => s.settings.fps);
   const setPropValue = useStore((s) => s.setPropValue);
@@ -279,12 +354,14 @@ function PropRow({ def, placed, local }: { def: PropDef; placed: PlacedClip; loc
   );
 }
 
-function KeyframeList({ placed }: { placed: PlacedClip }) {
+function KeyframeList({ placed }: { placed: Placed }) {
   const { clip } = placed;
   const fps = useStore((s) => s.settings.fps);
   const seek = useStore((s) => s.seek);
   const removeKeyframe = useStore((s) => s.removeKeyframe);
-  const rows = PROPS.flatMap((def) => clip.keyframes[def.key].map((kf) => ({ def, kf }))).sort((a, b) => a.kf.t - b.kf.t);
+  const rows = propsFor(placed.track.kind)
+    .flatMap((def) => clip.keyframes[def.key].map((kf) => ({ def, kf })))
+    .sort((a, b) => a.kf.t - b.kf.t);
   if (rows.length === 0) {
     return <p className="muted small">No keyframes yet — click ◆ next to a property to animate it.</p>;
   }

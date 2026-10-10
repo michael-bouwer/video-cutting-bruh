@@ -81,10 +81,3 @@ export function renderTransition(
     }
   }
 }
-
-/** Audio gains for (outgoing, incoming) during a transition. */
-export function transitionGains(type: TransitionType, p: number): [number, number] {
-  if (type === "cut") return [0, 1];
-  if (type === "dipToBlack") return p < 0.5 ? [1 - p * 2, 0] : [0, (p - 0.5) * 2];
-  return [1 - p, p];
-}

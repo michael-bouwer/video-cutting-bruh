@@ -1,5 +1,5 @@
 import { useStore } from "../store";
-import { formatTime, layoutClips } from "../lib/timeline";
+import { formatTime, timelineEnd } from "../lib/timeline";
 import { openImportDialog } from "../lib/media";
 import { shortResolution } from "./ProjectPanel";
 import { clearRecent, getRecent, newProject, openProject, saveProject } from "../lib/project";
@@ -14,7 +14,7 @@ export function Toolbar() {
   const playing = useStore((s) => s.playing);
   const setPlaying = useStore((s) => s.setPlaying);
   const currentTime = useStore((s) => s.currentTime);
-  const total = useStore((s) => layoutClips(s.clips).total);
+  const total = useStore((s) => timelineEnd(s.clips));
   const seek = useStore((s) => s.seek);
   const split = useStore((s) => s.splitAtPlayhead);
   const canUndo = useStore((s) => s.canUndo);

@@ -187,11 +187,19 @@ pub async fn ffmpeg_status() -> FfmpegStatus {
 /// NVIDIA ShadowPlay) only signal HDR in the HEVC bitstream's VUI, which the
 /// container-level probe doesn't parse.
 pub fn enrich_with_ffprobe(probe: &mut MediaProbe) {
+    let Some(bin) = locate("ffprobe") else { return };
+    if probe.has_audio.is_none() {
+        probe.has_audio = command(&bin)
+            .args(["-v", "error", "-select_streams", "a", "-show_entries", "stream=index", "-of", "csv=p=0"])
+            .arg(&probe.path)
+            .output()
+            .ok()
+            .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty());
+    }
     let has_transfer = probe.color.as_ref().is_some_and(|c| c.transfer.is_some());
     if has_transfer {
         return;
     }
-    let Some(bin) = locate("ffprobe") else { return };
     let Ok(out) = command(&bin)
         .args([
             "-v", "error",

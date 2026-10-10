@@ -1,7 +1,7 @@
 import { useEffect, useRef } from "react";
 import { player } from "../engine/player";
 import { useStore } from "../store";
-import { clipAt, layoutClips } from "../lib/timeline";
+import { clipEnd, trackFrameAt } from "../lib/timeline";
 import { valueAt } from "../lib/keyframes";
 import { openImportDialog } from "../lib/media";
 import { getRecent, newProject, openProject } from "../lib/project";
@@ -13,15 +13,22 @@ export function Preview() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   // Media under the playhead that's still being converted for preview.
   const pending = useStore((s) => {
-    const placed = clipAt(layoutClips(s.clips), s.currentTime);
-    const m = placed && s.media.find((x) => x.id === placed.clip.mediaId);
-    return m?.status === "proxying" ? Math.round((m.proxy?.progress ?? 0) * 100) : null;
+    // Topmost visible video track with a clip whose media is still being converted.
+    for (const track of [...s.tracks].reverse()) {
+      if (track.kind !== "video" || track.hidden) continue;
+      const clip = trackFrameAt(s.clips, track.id, s.currentTime).current;
+      const m = clip && s.media.find((x) => x.id === clip.mediaId);
+      if (m?.status === "proxying") return Math.round((m.proxy?.progress ?? 0) * 100);
+      if (clip) break;
+    }
+    return null;
   });
   // Whether dragging the canvas would move something right now.
   const dragTarget = useStore((s) => {
     if (s.selection?.kind !== "clip") return "none";
-    const placed = layoutClips(s.clips).items.find((p) => p.clip.id === s.selection!.clipId);
-    return placed && s.currentTime >= placed.start && s.currentTime <= placed.end ? "ready" : "outside";
+    const clip = s.clips.find((c) => c.id === s.selection!.clipId);
+    if (!clip || s.tracks.find((t) => t.id === clip.trackId)?.kind !== "video") return "none";
+    return s.currentTime >= clip.start && s.currentTime <= clipEnd(clip) ? "ready" : "outside";
   });
   // Wider-gamut canvas when HDR clips are allowed; webviews that don't support
   // it silently fall back to sRGB.
@@ -37,11 +44,12 @@ export function Preview() {
   const onPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
     const s = useStore.getState();
     if (s.selection?.kind !== "clip") return;
-    const placed = layoutClips(s.clips).items.find((p) => p.clip.id === s.selection!.clipId);
-    if (!placed || s.currentTime < placed.start || s.currentTime > placed.end) return;
-    const local = s.currentTime - placed.start;
-    const x0 = valueAt(placed.clip, "x", local);
-    const y0 = valueAt(placed.clip, "y", local);
+    const clip = s.clips.find((c) => c.id === s.selection!.clipId);
+    if (!clip || s.tracks.find((t) => t.id === clip.trackId)?.kind !== "video") return;
+    if (s.currentTime < clip.start || s.currentTime > clipEnd(clip)) return;
+    const local = s.currentTime - clip.start;
+    const x0 = valueAt(clip, "x", local);
+    const y0 = valueAt(clip, "y", local);
     const rect = e.currentTarget.getBoundingClientRect();
     const sx = e.clientX;
     const sy = e.clientY;
@@ -50,8 +58,8 @@ export function Preview() {
       const dx = ((ev.clientX - sx) / rect.width) * 100;
       const dy = ((ev.clientY - sy) / rect.height) * 100;
       const st = useStore.getState();
-      st.setPropValue(placed.clip.id, "x", local, Math.round((x0 + dx) * 10) / 10);
-      st.setPropValue(placed.clip.id, "y", local, Math.round((y0 + dy) * 10) / 10);
+      st.setPropValue(clip.id, "x", local, Math.round((x0 + dx) * 10) / 10);
+      st.setPropValue(clip.id, "y", local, Math.round((y0 + dy) * 10) / 10);
     };
     const up = () => {
       window.removeEventListener("pointermove", move);

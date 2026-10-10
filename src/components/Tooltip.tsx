@@ -82,6 +82,8 @@ export function TooltipLayer() {
 
     const onOver = (e: PointerEvent) => {
       if (e.pointerType === "touch") return;
+      // No tooltips while dragging media from the bin.
+      if (document.body.classList.contains("dragging-media")) return hide();
       const el = (e.target as Element | null)?.closest<HTMLElement>("[data-tip]") ?? null;
       if (el === current || el === suppressed) return;
       if (current) hide();

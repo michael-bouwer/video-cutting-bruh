@@ -60,6 +60,8 @@ pub struct MediaProbe {
     pub dolby_vision: bool,
     /// Mastering display / content light level metadata present.
     pub hdr_metadata: bool,
+    /// Whether the file has an audio track (None = couldn't tell).
+    pub has_audio: Option<bool>,
 }
 
 pub fn probe(path: &Path) -> std::io::Result<MediaProbe> {
@@ -141,6 +143,7 @@ fn probe_isobmff(f: &mut File, file_size: u64, out: &mut MediaProbe) -> std::io:
             let got = read_up_to(f, &mut body)?;
             body.truncate(got);
             walk_boxes(&body, out, &mut TrakCtx::default());
+            out.has_audio.get_or_insert(false);
             break;
         }
         pos += box_size;
@@ -186,7 +189,12 @@ fn walk_boxes(data: &[u8], out: &mut MediaProbe, ctx: &mut TrakCtx) {
             b"trak" => walk_boxes(body, out, &mut TrakCtx::default()),
             b"mdia" | b"minf" | b"stbl" => walk_boxes(body, out, ctx),
             b"mvhd" => out.duration = parse_mvhd(body),
-            b"hdlr" if body.len() >= 12 => ctx.is_video = &body[8..12] == b"vide",
+            b"hdlr" if body.len() >= 12 => {
+                ctx.is_video = &body[8..12] == b"vide";
+                if &body[8..12] == b"soun" {
+                    out.has_audio = Some(true);
+                }
+            }
             b"stsd" if ctx.is_video && out.video_codec.is_none() && body.len() > 8 => {
                 // Only the first sample entry matters for our purposes.
                 if let Some((codec, entry)) = boxes(&body[8..]).next() {
@@ -300,6 +308,8 @@ fn probe_matroska(f: &mut File, file_size: u64, out: &mut MediaProbe) -> std::io
     out.hdr_metadata = find(&buf, &[0x55, 0xD0]).is_some() || find(&buf, &[0x55, 0xBC, 0x81]).is_some();
     // Dolby Vision configuration in BlockAdditionMapping
     out.dolby_vision = find(&buf, b"dvcC").is_some() || find(&buf, b"dvvC").is_some();
+    // Audio CodecIDs all start with "A_" (A_AAC, A_OPUS, A_VORBIS, ...): 0x86 id, small size, "A_".
+    out.has_audio = Some(buf.windows(4).any(|w| w[0] == 0x86 && w[1] & 0x80 != 0 && &w[2..4] == b"A_"));
     Ok(())
 }
 
@@ -408,6 +418,8 @@ mod tests {
         assert!(p.dolby_vision);
         assert_eq!(p.color.as_ref().unwrap().transfer, Some(18));
         assert_eq!(p.hdr, Some(HdrKind::Hlg));
+        // The synthetic file only has a video track.
+        assert_eq!(p.has_audio, Some(false));
 
         std::fs::remove_dir_all(&dir).ok();
     }

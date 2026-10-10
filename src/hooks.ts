@@ -2,8 +2,8 @@ import { useEffect, useState } from "react";
 import { isTauri } from "@tauri-apps/api/core";
 import { importFiles, importPaths } from "./lib/media";
 import { useStore } from "./store";
-import { layoutClips } from "./lib/timeline";
-import { PROP_KEYS } from "./lib/props";
+import { clipDuration } from "./lib/timeline";
+import { propsFor } from "./lib/props";
 import { keyframeNear } from "./lib/keyframes";
 import { redo, undo } from "./lib/history";
 import { newProject, openProject, saveProject } from "./lib/project";
@@ -137,17 +137,19 @@ export function useShortcuts() {
         case "K": {
           // Keyframe every transform property of the selected clip at the playhead.
           if (s.selection?.kind !== "clip") break;
-          const placed = layoutClips(s.clips).items.find((p) => p.clip.id === s.selection!.clipId);
-          if (!placed) break;
-          const local = Math.min(placed.duration, Math.max(0, s.currentTime - placed.start));
-          for (const k of PROP_KEYS) {
-            if (!keyframeNear(placed.clip.keyframes[k], local, s.settings.fps)) s.toggleKeyframe(placed.clip.id, k, local);
+          const clip = s.clips.find((c) => c.id === s.selection!.clipId);
+          const kind = clip && s.tracks.find((t) => t.id === clip.trackId)?.kind;
+          if (!clip || !kind) break;
+          const local = Math.min(clipDuration(clip), Math.max(0, s.currentTime - clip.start));
+          for (const { key } of propsFor(kind)) {
+            if (!keyframeNear(clip.keyframes[key], local, s.settings.fps)) s.toggleKeyframe(clip.id, key, local);
           }
           break;
         }
         case "Delete":
         case "Backspace":
-          if (s.selection?.kind === "clip") s.removeClip(s.selection.clipId);
+          // Shift+Delete removes only this clip, leaving its linked video/audio.
+          if (s.selection?.kind === "clip") s.removeClip(s.selection.clipId, e.shiftKey);
           else if (s.selection?.kind === "transition") {
             s.setTransition(s.selection.clipId, { type: "cut" });
             s.select(null);

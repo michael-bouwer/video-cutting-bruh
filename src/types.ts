@@ -24,6 +24,8 @@ export interface MediaProbe {
   hdr: HdrKind | null;
   dolbyVision: boolean;
   hdrMetadata: boolean;
+  /** Whether the file has an audio track (null = unknown). */
+  hasAudio: boolean | null;
 }
 
 export interface ProxyState {
@@ -40,8 +42,8 @@ export interface ProxyState {
   error?: string;
 }
 
-/** Kind of media. Images become still clips (default 5 s, any length). */
-export type MediaKind = "video" | "image";
+/** Kind of media. Images become still clips (default 5 s, any length); audio goes on audio tracks. */
+export type MediaKind = "video" | "image" | "audio";
 
 export interface MediaItem {
   id: string;
@@ -93,16 +95,40 @@ export interface Keyframe {
 }
 
 /** Animatable property keys. Add new ones in `lib/props.ts`. */
-export type AnimProp = "x" | "y" | "scale" | "rotation" | "opacity";
+export type AnimProp = "x" | "y" | "scale" | "rotation" | "opacity" | "volume";
+
+export type TrackKind = "video" | "audio";
+
+export interface Track {
+  id: string;
+  kind: TrackKind;
+  name: string;
+  /** Video: hidden from the output. */
+  hidden: boolean;
+  /** Audio: silenced. */
+  muted: boolean;
+  /** Audio: only soloed tracks are heard (if any track is soloed). */
+  solo: boolean;
+  /** Locked tracks can't be edited. */
+  locked: boolean;
+}
 
 export interface Clip {
   id: string;
   mediaId: string;
-  /** Source in/out points in seconds. */
+  trackId: string;
+  /** Position on the timeline in seconds (clips can be placed anywhere; gaps are allowed). */
+  start: number;
+  /** Source in/out points in seconds. The visible length is trimOut - trimIn. */
   trimIn: number;
   trimOut: number;
-  /** Transition from the previous clip into this one. */
+  /** Clips sharing a linkId (a video and its audio) move, trim, split and delete together. */
+  linkId: string | null;
+  /** Transition from the clip that ends where this one starts on the same track. */
   transitionIn: Transition;
+  /** Audio only: fade lengths in seconds. */
+  fadeIn: number;
+  fadeOut: number;
   /** Static value used when a property has no keyframes. */
   base: Record<AnimProp, number>;
   keyframes: Record<AnimProp, Keyframe[]>;

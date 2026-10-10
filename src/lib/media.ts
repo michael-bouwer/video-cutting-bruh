@@ -5,7 +5,8 @@ import type { FfmpegStatus, HdrKind, MediaItem, MediaKind, MediaProbe, ProxyQual
 
 export const VIDEO_EXTENSIONS = ["mp4", "mov", "m4v", "webm", "mkv"];
 export const IMAGE_EXTENSIONS = ["png", "jpg", "jpeg", "webp", "gif", "bmp", "avif"];
-export const MEDIA_EXTENSIONS = [...VIDEO_EXTENSIONS, ...IMAGE_EXTENSIONS];
+export const AUDIO_EXTENSIONS = ["mp3", "wav", "m4a", "aac", "flac", "ogg", "oga", "opus"];
+export const MEDIA_EXTENSIONS = [...VIDEO_EXTENSIONS, ...IMAGE_EXTENSIONS, ...AUDIO_EXTENSIONS];
 /** Length of a still image when it's first placed on the timeline. */
 export const IMAGE_DEFAULT_DURATION = 5;
 /** Longest an image clip can be trimmed out to. */
@@ -15,6 +16,7 @@ const IMPORT_FILTERS = [
   { name: "Media", extensions: MEDIA_EXTENSIONS },
   { name: "Video", extensions: VIDEO_EXTENSIONS },
   { name: "Images", extensions: IMAGE_EXTENSIONS },
+  { name: "Audio", extensions: AUDIO_EXTENSIONS },
 ];
 
 interface ImportResult {
@@ -25,7 +27,32 @@ interface ImportResult {
 
 const extOf = (p: string) => p.split(/[\\/]/).pop()?.split(".").pop()?.toLowerCase() ?? "";
 const nameOf = (p: string) => p.split(/[\\/]/).pop() ?? p;
-export const kindOf = (p: string): MediaKind => (IMAGE_EXTENSIONS.includes(extOf(p)) ? "image" : "video");
+export const kindOf = (p: string): MediaKind =>
+  IMAGE_EXTENSIONS.includes(extOf(p)) ? "image" : AUDIO_EXTENSIONS.includes(extOf(p)) ? "audio" : "video";
+
+/** Loads an audio file's metadata to learn its length. */
+function loadAudio(src: string): Promise<{ duration: number }> {
+  return new Promise((resolve, reject) => {
+    const a = new Audio();
+    a.preload = "metadata";
+    const timer = setTimeout(() => reject(new Error("Timed out reading audio")), 20000);
+    const done = (fn: () => void) => {
+      clearTimeout(timer);
+      fn();
+      a.removeAttribute("src");
+      a.load();
+    };
+    a.onloadedmetadata = () => {
+      const finish = () =>
+        done(() => (Number.isFinite(a.duration) && a.duration > 0 ? resolve({ duration: a.duration }) : reject(new Error("Unknown duration"))));
+      if (a.duration !== Infinity) return finish();
+      a.ondurationchange = () => Number.isFinite(a.duration) && finish();
+      a.currentTime = Number.MAX_SAFE_INTEGER;
+    };
+    a.onerror = () => done(() => reject(new Error(a.error?.message || "Unsupported audio format")));
+    a.src = src;
+  });
+}
 
 /** Loads an image to learn its size. */
 function loadImage(src: string): Promise<{ width: number; height: number }> {
@@ -227,6 +254,18 @@ export function regenerateProxies() {
  */
 async function prepare(item: MediaItem, onAppendable: () => void): Promise<boolean> {
   const { updateMedia, notify } = useStore.getState();
+  if (item.kind === "audio") {
+    try {
+      const { duration } = await loadAudio(item.src);
+      updateMedia(item.id, { duration, width: 0, height: 0, status: "ready" });
+      return true;
+    } catch (e) {
+      const msg = `${e instanceof Error ? e.message : e}. ${platform() === "linux" ? "Make sure GStreamer plugins are installed." : "Try mp3, wav, m4a/aac, flac or ogg."}`;
+      updateMedia(item.id, { status: "error", error: msg });
+      notify("error", `${item.name}: ${msg}`);
+      return false;
+    }
+  }
   if (item.kind === "image") {
     try {
       const size = await loadImage(item.src);
@@ -290,7 +329,7 @@ export async function importPaths(paths: string[], toTimeline = false) {
   const { notify, addMedia } = useStore.getState();
   const videos = paths.filter((p) => MEDIA_EXTENSIONS.includes(extOf(p)));
   const skipped = paths.length - videos.length;
-  if (skipped > 0) notify("warn", `Skipped ${skipped} file(s) that aren't videos or images (${MEDIA_EXTENSIONS.join(", ")}).`);
+  if (skipped > 0) notify("warn", `Skipped ${skipped} file(s) that aren't videos, images or audio (${MEDIA_EXTENSIONS.join(", ")}).`);
   if (videos.length === 0) return;
 
   if (!useStore.getState().ffmpeg) await refreshFfmpegStatus();
@@ -422,13 +461,13 @@ export async function importFiles(files: File[], toTimeline = false) {
   const { addMedia, notify } = useStore.getState();
   const items: MediaItem[] = [];
   for (const f of files) {
-    if (!MEDIA_EXTENSIONS.includes(extOf(f.name)) && !/^(video|image)\//.test(f.type)) {
-      notify("warn", `Skipped ${f.name}: not a video or image.`);
+    if (!MEDIA_EXTENSIONS.includes(extOf(f.name)) && !/^(video|image|audio)\//.test(f.type)) {
+      notify("warn", `Skipped ${f.name}: not a video, image or audio file.`);
       continue;
     }
     const item: MediaItem = {
       id: uid(),
-      kind: f.type.startsWith("image/") || IMAGE_EXTENSIONS.includes(extOf(f.name)) ? "image" : "video",
+      kind: f.type.startsWith("image/") ? "image" : f.type.startsWith("audio/") ? "audio" : kindOf(f.name),
       addedAt: Date.now(),
       name: f.name,
       path: f.name,

@@ -22,7 +22,7 @@ const extOf = (p: string) => p.split(/[\\/]/).pop()?.split(".").pop()?.toUpperCa
 
 // ---- Categories -----------------------------------------------------------------
 
-type CategoryKey = "attention" | "hdr" | "video" | "image";
+type CategoryKey = "attention" | "hdr" | "video" | "image" | "audio";
 
 /** First match wins, so e.g. a missing HDR file is listed under "Needs attention". */
 const CATEGORIES: { key: CategoryKey; label: string; icon: string; hint: string; test: (m: MediaItem) => boolean }[] = [
@@ -42,6 +42,7 @@ const CATEGORIES: { key: CategoryKey; label: string; icon: string; hint: string;
   },
   { key: "video", label: "Video", icon: "▶", hint: "Standard (SDR) videos", test: (m) => m.kind === "video" },
   { key: "image", label: "Images", icon: "▣", hint: "Still images — they become 5 s clips you can trim to any length", test: (m) => m.kind === "image" },
+  { key: "audio", label: "Audio", icon: "♪", hint: "Music and sound files — they go on audio tracks", test: (m) => m.kind === "audio" },
 ];
 const categoryOf = (m: MediaItem) => CATEGORIES.find((c) => c.test(m))!.key;
 
@@ -97,7 +98,7 @@ export function MediaBin() {
   }, [prefs]);
 
   const counts = useMemo(() => {
-    const c: Record<CategoryKey, number> = { attention: 0, hdr: 0, video: 0, image: 0 };
+    const c: Record<CategoryKey, number> = { attention: 0, hdr: 0, video: 0, image: 0, audio: 0 };
     media.forEach((m) => c[categoryOf(m)]++);
     return c;
   }, [media]);
@@ -144,9 +145,9 @@ export function MediaBin() {
 
       {media.length === 0 ? (
         <button className="empty-drop" onClick={openImportDialog}>
-          <strong>Drop videos or images here</strong>
+          <strong>Drop videos, images or audio here</strong>
           <span>or click to browse</span>
-          <span className="muted small">mp4 · mov · mkv · webm · png · jpg · webp…</span>
+          <span className="muted small">mp4 · mov · mkv · png · jpg · mp3 · wav · m4a…</span>
         </button>
       ) : (
         <>
@@ -184,6 +185,33 @@ export function MediaBin() {
 
           {visible.length === 0 ? (
             <p className="muted small bin-empty">No media matches “{query}”.</p>
+          ) : prefs.view === "details" ? (
+            // One table for all groups so columns line up and there's a single horizontal scroll.
+            <div className="details-scroll">
+              <table className="details-table">
+                <DetailsHead />
+                {groups.map((g) => {
+                  const collapsed = prefs.collapsed.includes(g.key) && filter === "all";
+                  return (
+                    <tbody key={g.key} className={`bin-group ${g.key}`}>
+                      {filter === "all" && (
+                        <tr className="group-row">
+                          <td colSpan={8}>
+                            <button className="group-header" aria-expanded={!collapsed} onClick={() => toggleGroup(g.key)} {...tip(g.hint)}>
+                              <span className="caret">{collapsed ? "▸" : "▾"}</span>
+                              <span className="group-icon">{g.icon}</span>
+                              {g.label}
+                              <span className="muted small">{g.items.length}</span>
+                            </button>
+                          </td>
+                        </tr>
+                      )}
+                      {!collapsed && g.items.map((m) => <DetailsRow key={m.id} item={m} />)}
+                    </tbody>
+                  );
+                })}
+              </table>
+            </div>
           ) : (
             groups.map((g) => {
               const collapsed = prefs.collapsed.includes(g.key) && filter === "all";
@@ -197,7 +225,7 @@ export function MediaBin() {
                       <span className="muted small">{g.items.length}</span>
                     </button>
                   )}
-                  {!collapsed && <ItemsView view={prefs.view} items={g.items} />}
+                  {!collapsed && <ItemsView view={prefs.view as Exclude<ViewMode, "details">} items={g.items} />}
                 </section>
               );
             })
@@ -217,32 +245,24 @@ function Chip({ active, onClick, hint, warn, children }: { active: boolean; onCl
   );
 }
 
-function ItemsView({ view, items }: { view: ViewMode; items: MediaItem[] }) {
-  if (view === "details") {
-    return (
-      <div className="details-scroll">
-        <table className="details-table">
-          <thead>
-            <tr>
-              <th>Name</th>
-              <th>Length</th>
-              <th>Resolution</th>
-              <th>Format</th>
-              <th>Color</th>
-              <th>Size</th>
-              <th>Used</th>
-              <th aria-label="Actions" />
-            </tr>
-          </thead>
-          <tbody>
-            {items.map((m) => (
-              <DetailsRow key={m.id} item={m} />
-            ))}
-          </tbody>
-        </table>
-      </div>
-    );
-  }
+function DetailsHead() {
+  return (
+    <thead>
+      <tr>
+        <th className="name-col">Name</th>
+        <th>Length</th>
+        <th>Resolution</th>
+        <th>Format</th>
+        <th>Color</th>
+        <th {...tip("File size on disk")}>Size</th>
+        <th {...tip("Number of clips on the timeline using this file")}>Used</th>
+        <th aria-label="Actions" />
+      </tr>
+    </thead>
+  );
+}
+
+function ItemsView({ view, items }: { view: Exclude<ViewMode, "details">; items: MediaItem[] }) {
   return (
     <ul className={view === "grid" ? "media-grid" : "media-list"}>
       {items.map((m) => (view === "grid" ? <GridCard key={m.id} item={m} /> : <ListRow key={m.id} item={m} />))}
@@ -315,6 +335,7 @@ function Actions({ item, placeable, remove, appendClip }: { item: MediaItem; pla
 }
 
 function Thumb({ item }: { item: MediaItem }) {
+  if (item.status === "ready" && item.kind === "audio") return <span className="thumb-audio">♪</span>;
   if (item.status === "ready") {
     return item.kind === "image" ? (
       <img src={item.src} alt="" loading="lazy" draggable={false} />
@@ -454,15 +475,17 @@ function DetailsRow({ item }: { item: MediaItem }) {
   const dragging = useStore((s) => s.mediaDrag?.mediaId === item.id);
   const { usedBy, placeable, remove, interact, itemTip, appendClip } = useItem(item);
   const p = item.probe;
-  const format = item.kind === "image" ? extOf(item.path) : [p?.videoCodec && codecName(p.videoCodec), p?.container?.toUpperCase()].filter(Boolean).join(" · ") || extOf(item.path);
-  const color = p?.hdr ? hdrLabel(p.hdr) : item.kind === "image" ? "—" : `SDR${p?.bitDepth ? ` ${p.bitDepth}-bit` : ""}`;
+  const format = item.kind !== "video" ? extOf(item.path) : [p?.videoCodec && codecName(p.videoCodec), p?.container?.toUpperCase()].filter(Boolean).join(" · ") || extOf(item.path);
+  const color = p?.hdr ? hdrLabel(p.hdr) : item.kind !== "video" ? "—" : `SDR${p?.bitDepth ? ` ${p.bitDepth}-bit` : ""}`;
   return (
     <tr className={`${item.status} ${dragging ? "dragging" : ""} ${placeable ? "draggable" : ""}`} {...interact}>
-      <td className="name-cell" {...itemTip}>
-        <span className="mini-thumb">
-          <Thumb item={item} />
-        </span>
-        <span className="media-name">{item.name}</span>
+      <td className="name-col" {...itemTip}>
+        <div className="name-cell">
+          <span className="mini-thumb">
+            <Thumb item={item} />
+          </span>
+          <span className="media-name">{item.name}</span>
+        </div>
       </td>
       <td>{lengthOf(item, fps)}</td>
       <td>{resolutionOf(item)}</td>

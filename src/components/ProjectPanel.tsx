@@ -4,7 +4,7 @@ import { useStore } from "../store";
 import { regenerateProxies } from "../lib/media";
 import { saveProject } from "../lib/project";
 import { projectName } from "../lib/dialog";
-import { formatTime, layoutClips } from "../lib/timeline";
+import { formatTime, timelineEnd } from "../lib/timeline";
 import { tip } from "./Tooltip";
 import type { ProxyMode, ProxyQuality } from "../types";
 
@@ -52,7 +52,7 @@ function ProjectInfo() {
   const clips = useStore((s) => s.clips);
   const mediaCount = useStore((s) => s.media.length);
   const fps = useStore((s) => s.settings.fps);
-  const total = layoutClips(clips).total;
+  const total = timelineEnd(clips);
 
   const reveal = async () => {
     if (!projectPath) return;
