@@ -92,6 +92,14 @@ export interface Keyframe {
   v: number;
   /** Easing used from this keyframe to the next one. */
   ease: Easing;
+  /** Display colour, randomly assigned on creation so keyframes are easy to tell apart. */
+  color?: string;
+  /**
+   * Created by a split to pin the value at the cut so motion stays continuous.
+   * Removed again if the segment on the other side of that cut is deleted;
+   * cleared as soon as the user edits it.
+   */
+  split?: boolean;
 }
 
 /** Animatable property keys. Add new ones in `lib/props.ts`. */
@@ -113,6 +121,35 @@ export interface Track {
   locked: boolean;
 }
 
+/** See lib/effects.ts for the registry of effect types and their parameters. */
+export type EffectType =
+  | "brightness"
+  | "contrast"
+  | "saturation"
+  | "hue"
+  | "blur"
+  | "grayscale"
+  | "sepia"
+  | "invert"
+  | "vignette"
+  | "gain"
+  | "pan"
+  | "lowcut"
+  | "highcut"
+  | "bass"
+  | "treble"
+  | "echo";
+
+export interface Effect {
+  id: string;
+  type: EffectType;
+  enabled: boolean;
+  /** Static parameter values (used when a parameter has no keyframes). */
+  params: Record<string, number>;
+  /** Per-parameter keyframes, clip-local times like transform keyframes. */
+  keyframes: Record<string, Keyframe[]>;
+}
+
 export interface Clip {
   id: string;
   mediaId: string;
@@ -132,6 +169,8 @@ export interface Clip {
   /** Static value used when a property has no keyframes. */
   base: Record<AnimProp, number>;
   keyframes: Record<AnimProp, Keyframe[]>;
+  /** Effect stack, applied top to bottom. */
+  effects: Effect[];
 }
 
 /**
@@ -161,6 +200,15 @@ export interface FfmpegStatus {
   canTonemap: boolean;
   /** Detected hardware support (null if ffmpeg is missing). */
   caps: { gpuFilters: boolean; encoder: string; zscale: boolean } | null;
+}
+
+/** Address of one keyframe: a transform property (`fx` null) or an effect parameter. */
+export interface KeyframeRef {
+  clipId: string;
+  /** Effect id, or null for transform/volume properties. */
+  fx: string | null;
+  key: string;
+  kfId: string;
 }
 
 export type Selection =

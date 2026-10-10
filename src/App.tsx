@@ -10,6 +10,8 @@ import { DialogHost, Splitter } from "./components/ui";
 import { TooltipLayer } from "./components/Tooltip";
 import { NewProjectDialog } from "./components/NewProjectDialog";
 import { MediaDragGhost } from "./components/MediaDragGhost";
+import { EffectsPanel } from "./components/EffectsPanel";
+import { useStore } from "./store";
 import { useFileDrop, useShortcuts } from "./hooks";
 import { installHistory } from "./lib/history";
 import { installProjectLifecycle } from "./lib/project";
@@ -17,6 +19,7 @@ import { usePanelSizes } from "./lib/layout";
 
 export default function App() {
   const drop = useFileDrop();
+  const effectsOpen = useStore((s) => s.effectsOpen);
   const { sizes, begin, resize, reset } = usePanelSizes();
   useShortcuts();
   useEffect(() => installHistory(), []);
@@ -31,11 +34,12 @@ export default function App() {
   return (
     <div className={`app ${drop.active ? "dragging-files" : ""}`} data-drop-target={drop.zone ?? ""} style={vars}>
       <Toolbar />
-      <main className="workspace">
+      <main className={`workspace ${effectsOpen ? "with-effects" : ""}`}>
         <MediaBin />
         <Splitter orientation="vertical" onStart={begin} onDrag={(d) => resize("bin", d)} onReset={reset} />
         <Preview />
         <Splitter orientation="vertical" onStart={begin} onDrag={(d) => resize("inspector", -d)} onReset={reset} />
+        {effectsOpen && <EffectsPanel />}
         <Inspector />
       </main>
       <Splitter orientation="horizontal" onStart={begin} onDrag={(d) => resize("timeline", -d)} onReset={reset} />

@@ -1,6 +1,7 @@
 import { useStore } from "../store";
 import type { AnimProp, Clip, MediaItem, Track } from "../types";
-import { transformAt, valueAt } from "../lib/keyframes";
+import { effectValueAt, transformAt, valueAt } from "../lib/keyframes";
+import { buildAudioEffect, canvasFiltersSupported, cssFilter, drawOverlays, type AudioEffectNodes } from "../lib/effects";
 import { activeRange, clipDuration, timelineEnd, trackFrameAt } from "../lib/timeline";
 import { renderTransition } from "../lib/transitions";
 
@@ -18,8 +19,20 @@ const MAX_DRIFT = 0.25;
  * store's clock, composites video tracks bottom-to-top onto a canvas, and mixes
  * audio tracks (clip volume × fades × track mute/solo).
  */
+/** Per audio clip: element → effect chain → clip gain → master. */
+interface AudioChain {
+  source: MediaElementAudioSourceNode;
+  gain: GainNode;
+  /** Effect ids/types/enabled, to know when the chain must be rebuilt. */
+  signature: string;
+  fx: { id: string; nodes: AudioEffectNodes }[];
+}
+
 class Player {
   private elements = new Map<string, HTMLMediaElement>();
+  private audioCtx: AudioContext | null = null;
+  private master: GainNode | null = null;
+  private chains = new Map<string, AudioChain>();
   /** Decoded stills, keyed by URL. */
   private images = new Map<string, HTMLImageElement>();
   private host: HTMLDivElement;
@@ -42,6 +55,70 @@ class Player {
       pointerEvents: "none",
     });
     document.body.appendChild(this.host);
+
+    // Browsers only start audio after a user gesture.
+    const unlock = () => this.audioCtx?.state === "suspended" && this.audioCtx.resume().catch(() => {});
+    window.addEventListener("pointerdown", unlock, true);
+    window.addEventListener("keydown", unlock, true);
+  }
+
+  /** Web Audio graph for audio effects; null if unavailable (plain element volume is used then). */
+  private audioGraph(): { ctx: AudioContext; master: GainNode } | null {
+    if (this.audioCtx && this.master) return { ctx: this.audioCtx, master: this.master };
+    try {
+      this.audioCtx = new AudioContext();
+      this.master = this.audioCtx.createGain();
+      this.master.connect(this.audioCtx.destination);
+      return { ctx: this.audioCtx, master: this.master };
+    } catch {
+      return null;
+    }
+  }
+
+  /** Connects (or rebuilds) an audio clip's effect chain. */
+  private chainFor(clip: Clip, el: HTMLMediaElement): AudioChain | null {
+    const graph = this.audioGraph();
+    if (!graph) return null;
+    const { ctx, master } = graph;
+    let chain = this.chains.get(clip.id);
+    if (!chain) {
+      let source: MediaElementAudioSourceNode;
+      try {
+        source = ctx.createMediaElementSource(el);
+      } catch {
+        return null;
+      }
+      const gain = ctx.createGain();
+      gain.connect(master);
+      chain = { source, gain, signature: "", fx: [] };
+      this.chains.set(clip.id, chain);
+    }
+    const active = clip.effects.filter((fx) => fx.enabled);
+    const signature = active.map((fx) => `${fx.id}:${fx.type}`).join("|");
+    if (signature !== chain.signature) {
+      chain.source.disconnect();
+      chain.fx.forEach(({ nodes }) => nodes.output.disconnect());
+      chain.fx = active
+        .map((fx) => ({ id: fx.id, nodes: buildAudioEffect(ctx, fx.type) }))
+        .filter((x): x is { id: string; nodes: AudioEffectNodes } => !!x.nodes);
+      let tail: AudioNode = chain.source;
+      for (const { nodes } of chain.fx) {
+        tail.connect(nodes.input);
+        tail = nodes.output;
+      }
+      tail.connect(chain.gain);
+      chain.signature = signature;
+    }
+    return chain;
+  }
+
+  /** PNG of the current preview frame, at project resolution. */
+  capture(): Promise<Blob> {
+    const canvas = this.ctx?.canvas;
+    if (!canvas) return Promise.reject(new Error("The preview isn't ready"));
+    return new Promise((resolve, reject) =>
+      canvas.toBlob((b) => (b ? resolve(b) : reject(new Error("Couldn't encode the frame"))), "image/png"),
+    );
   }
 
   attach(canvas: HTMLCanvasElement, colorSpace: PredefinedColorSpace) {
@@ -82,6 +159,9 @@ class Player {
         el = v;
       }
       el.preload = "auto";
+      // Tauri's asset protocol sends Access-Control-Allow-Origin, so CORS-mode loading works and
+      // keeps the canvas readable (screenshots) and audio usable by Web Audio (effects).
+      el.crossOrigin = "anonymous";
       this.host.appendChild(el);
       this.elements.set(clip.id, el);
     }
@@ -93,6 +173,13 @@ class Player {
   }
 
   private dispose(id: string, el: HTMLMediaElement) {
+    const chain = this.chains.get(id);
+    if (chain) {
+      chain.source.disconnect();
+      chain.fx.forEach(({ nodes }) => nodes.output.disconnect());
+      chain.gain.disconnect();
+      this.chains.delete(id);
+    }
     el.pause();
     el.removeAttribute("src");
     el.load();
@@ -110,6 +197,7 @@ class Player {
     if (!img) {
       img = new Image();
       img.decoding = "async";
+      img.crossOrigin = "anonymous";
       img.src = m.src;
       this.images.set(m.src, img);
     }
@@ -162,7 +250,23 @@ class Player {
       const maxT = Math.max(0, (m.duration || c.trimOut) - 0.001);
       const src = Math.min(maxT, Math.max(0, c.trimIn + (t - c.start)));
 
-      if (audio) el.volume = silent ? 0 : audioGain(c, t);
+      if (audio) {
+        const gain = silent ? 0 : audioGain(c, t);
+        const chain = this.chainFor(c, el);
+        if (chain) {
+          el.volume = 1;
+          const ac = this.audioCtx!;
+          chain.gain.gain.setTargetAtTime(gain, ac.currentTime, 0.015);
+          const local = t - c.start;
+          for (const { id, nodes } of chain.fx) {
+            const fx = c.effects.find((e) => e.id === id);
+            if (fx) nodes.update((k) => effectValueAt(fx, k, local));
+          }
+          if (playing && ac.state === "suspended") ac.resume().catch(() => {});
+        } else {
+          el.volume = gain;
+        }
+      }
 
       if (playing && t >= from) {
         if (el.paused) {
@@ -195,15 +299,16 @@ class Player {
 
     const drawer = (c: Clip) => (cx: CanvasRenderingContext2D, alpha: number) => {
       const m = media.get(c.mediaId);
-      const tr = transformAt(c, t - c.start);
+      const local = t - c.start;
+      const tr = transformAt(c, local);
       if (m?.kind === "image") {
         if (m.status !== "ready") return;
         const img = this.imageFor(m);
-        if (img.complete && img.naturalWidth) drawSource(cx, img, img.naturalWidth, img.naturalHeight, tr, alpha, w, h);
+        if (img.complete && img.naturalWidth) drawSource(cx, img, img.naturalWidth, img.naturalHeight, tr, alpha, w, h, c, local);
         return;
       }
       const v = this.elements.get(c.id) as HTMLVideoElement | undefined;
-      if (v && v.readyState >= 2 && v.videoWidth) drawSource(cx, v, v.videoWidth, v.videoHeight, tr, alpha, w, h);
+      if (v && v.readyState >= 2 && v.videoWidth) drawSource(cx, v, v.videoWidth, v.videoHeight, tr, alpha, w, h, c, local);
     };
 
     // Video tracks in creation order: V1 at the bottom, higher tracks on top.
@@ -240,6 +345,8 @@ function drawSource(
   alpha: number,
   w: number,
   h: number,
+  clip: Clip,
+  local: number,
 ) {
   const a = (tr.opacity / 100) * alpha;
   if (a <= 0) return;
@@ -253,7 +360,10 @@ function drawSource(
   ctx.translate(w / 2 + (tr.x / 100) * w, h / 2 + (tr.y / 100) * h);
   ctx.rotate((tr.rotation * Math.PI) / 180);
   ctx.scale(s, s);
+  if (canvasFiltersSupported) ctx.filter = cssFilter(clip, local, h);
   ctx.drawImage(src, -dw / 2, -dh / 2, dw, dh);
+  if (canvasFiltersSupported) ctx.filter = "none";
+  drawOverlays(ctx, clip, local, -dw / 2, -dh / 2, dw, dh);
   ctx.restore();
 }
 

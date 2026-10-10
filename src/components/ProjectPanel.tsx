@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { NumberField } from "./NumberField";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { useStore } from "../store";
 import { regenerateProxies } from "../lib/media";
@@ -100,19 +101,6 @@ function FormatSection() {
   const groups = [...new Set(RESOLUTIONS.map((r) => r.group))];
   const sized = media.filter((m) => (m.probe?.width ?? m.width) > 0);
 
-  // Local drafts so typing "19" on the way to "1920" doesn't resize the canvas each keystroke.
-  const [w, setW] = useState(String(width));
-  const [h, setH] = useState(String(height));
-  useEffect(() => setW(String(width)), [width]);
-  useEffect(() => setH(String(height)), [height]);
-  const commit = () => {
-    const nw = even(Number(w) || width);
-    const nh = even(Number(h) || height);
-    setW(String(nw));
-    setH(String(nh));
-    if (nw !== width || nh !== height) setSettings({ width: nw, height: nh });
-  };
-
   return (
     <section className="settings-section">
       <div className="section-title">Video format</div>
@@ -141,30 +129,26 @@ function FormatSection() {
       <div className="field size-field">
         <span>Size</span>
         <div className="size-inputs">
-          <input
-            type="number"
+          <NumberField
+            value={width}
             min={16}
             max={8192}
             step={2}
-            value={w}
-            onChange={(e) => setW(e.target.value)}
-            onBlur={commit}
-            onKeyDown={(e) => e.key === "Enter" && commit()}
+            precision={0}
+            onChange={(v) => setSettings({ width: even(v) })}
             aria-label="Width"
-            {...tip("Width in pixels (rounded to an even number)")}
+            {...tip("Width in pixels (rounded to an even number). Drag left/right to change (Shift: faster, Alt: finer), or click to type.")}
           />
           <span className="muted">×</span>
-          <input
-            type="number"
+          <NumberField
+            value={height}
             min={16}
             max={8192}
             step={2}
-            value={h}
-            onChange={(e) => setH(e.target.value)}
-            onBlur={commit}
-            onKeyDown={(e) => e.key === "Enter" && commit()}
+            precision={0}
+            onChange={(v) => setSettings({ height: even(v) })}
             aria-label="Height"
-            {...tip("Height in pixels (rounded to an even number)")}
+            {...tip("Height in pixels (rounded to an even number). Drag left/right to change (Shift: faster, Alt: finer), or click to type.")}
           />
           <button
             className="icon-btn"

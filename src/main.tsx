@@ -13,9 +13,14 @@ ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
 
 // Dev-only handle for debugging from the devtools console.
 if (import.meta.env.DEV) {
-  Promise.all([import("./store"), import("./lib/media"), import("./lib/project"), import("./lib/history")]).then(
-    ([store, media, project, history]) => {
-      (window as unknown as Record<string, unknown>).__vcb = { useStore: store.useStore, media, project, history };
-    },
-  );
+  Promise.all([
+    import("./store"),
+    import("./lib/media"),
+    import("./lib/project"),
+    import("./lib/history"),
+    import("./engine/player"),
+    import("./lib/screenshot"),
+  ]).then(([store, media, project, history, engine, screenshot]) => {
+    (window as unknown as Record<string, unknown>).__vcb = { useStore: store.useStore, media, project, history, player: engine.player, screenshot };
+  });
 }

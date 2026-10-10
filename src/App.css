@@ -690,3 +690,145 @@ body.dragging-media, body.dragging-media * { cursor: grabbing !important; user-s
 .drag-ghost.over { border-color: var(--accent); }
 .drag-ghost-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .drag-ghost .small { color: var(--tooltip-muted); }
+
+/* ---- Scrubbable number fields (components/NumberField.tsx) ---- */
+.number-field {
+  display: inline-flex; align-items: center; min-width: 0; max-width: 100%;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 5px;
+  overflow: hidden;
+}
+.number-field input {
+  flex: 1 1 auto; width: 0; min-width: 0; padding: 3px 4px 3px 6px;
+  background: none; border: none; outline: none; text-align: right;
+  font-variant-numeric: tabular-nums; cursor: ew-resize; user-select: none;
+}
+.number-field:hover:not(.disabled) { border-color: var(--hover-border); }
+.number-field.editing { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.number-field.editing input { cursor: text; user-select: text; }
+.number-field:focus-within { border-color: var(--accent); }
+.number-field.disabled { opacity: 0.5; }
+.number-unit { flex: none; padding: 0 6px 0 2px; color: var(--muted); font-size: 11px; pointer-events: none; }
+body.scrubbing, body.scrubbing * { cursor: ew-resize !important; user-select: none; }
+
+/* Field rows never let inputs spill out of the panel. */
+.field > .number-field, .field > select, .field > input { width: 100%; min-width: 0; }
+.field { grid-template-columns: 64px minmax(0, 1fr) auto; }
+.prop-head .number-field.prop-number { flex: 0 1 84px; width: 84px !important; min-width: 56px; }
+.size-inputs .number-field { flex: 1 1 0; }
+
+/* ---- Workspace with the effects pop-out ---- */
+.workspace.with-effects {
+  grid-template-columns:
+    clamp(150px, var(--bin-w), 22vw)
+    var(--splitter)
+    minmax(240px, 1fr)
+    var(--splitter)
+    clamp(210px, 21vw, 290px)
+    clamp(200px, var(--insp-w), 26vw);
+}
+.effects-panel {
+  display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden;
+  background: var(--panel); border-right: 1px solid var(--border);
+  animation: fx-in 0.14s ease-out;
+}
+@keyframes fx-in { from { opacity: 0; transform: translateX(12px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) { .effects-panel { animation: none; } }
+.effects-header { display: flex; align-items: center; justify-content: space-between; padding: 7px 8px 6px 10px; border-bottom: 1px solid var(--border); flex: none; }
+.effects-header .panel-title { margin: 0; }
+.effects-body { flex: 1; }
+.fx-target { display: flex; flex-direction: column; margin-bottom: 6px; }
+.fx-target-name { font-weight: 600; overflow-wrap: anywhere; }
+.fx-empty { margin: 8px 0; }
+.fx-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(84px, 1fr)); gap: 6px; }
+.fx-tile {
+  display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 8px 4px;
+  white-space: normal; text-align: center; line-height: 1.2; min-width: 0;
+}
+.fx-tile .fx-icon { font-size: 16px; }
+.fx-tile .fx-label { font-size: 11px; overflow-wrap: anywhere; }
+.fx-card { border: 1px solid var(--border); border-radius: 7px; padding: 4px 8px 6px; margin-bottom: 8px; background: var(--panel-2); }
+.fx-card.disabled .fx-param { opacity: 0.45; }
+.fx-card-head { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.fx-caret { padding: 0 2px; }
+.fx-enable { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; font-weight: 600; cursor: pointer; }
+.fx-enable span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fx-actions { display: flex; flex: none; }
+.fx-actions .icon { padding: 0 4px; }
+.fx-param { border-bottom: none; padding: 4px 0 2px; }
+.fx-param .prop-body { padding-left: 24px; }
+.fx-toggle { margin-left: auto; color: var(--muted); }
+.fx-toggle.active-fx { color: var(--accent); }
+.fx-count { display: inline-block; min-width: 16px; margin-left: 5px; padding: 0 4px; border-radius: 8px; background: var(--accent); color: var(--on-accent); font-size: 10px; line-height: 15px; text-align: center; }
+
+/* ---- Timeline actions (split / screenshot) ---- */
+.timeline-actions { display: flex; gap: 6px; flex: none; }
+.timeline-actions button { padding: 2px 10px; }
+.split-btn { font-weight: 600; }
+
+/* Narrow inspector: tabs shrink instead of overflowing; the effects toggle collapses to its icon. */
+.right-panel { container-type: inline-size; }
+.tabs { min-width: 0; }
+.tab { min-width: 0; overflow: hidden; text-overflow: ellipsis; flex: 0 1 auto; padding: 5px 10px; }
+.fx-toggle { flex: none; }
+@container (max-width: 300px) {
+  .fx-toggle-label, .fx-toggle-arrow { display: none; }
+  .tab { padding: 5px 8px; }
+}
+
+/* ---- Keyframe lanes (components/KeyframeLanes.tsx) ---- */
+.kf-lane { height: 24px; }
+.kf-lane .lane { background: color-mix(in srgb, var(--track-bg) 70%, var(--panel)); }
+.kf-lane-header { padding-left: 22px; font-size: 11px; background: var(--panel); }
+.kf-lane-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.kf-lane.empty { height: 28px; }
+.kf-lane-hint { position: sticky; left: 8px; line-height: 28px; padding-left: 8px; white-space: nowrap; }
+.kf-clip-span {
+  position: absolute; top: 5px; bottom: 5px; border-radius: 3px; pointer-events: none;
+  background: color-mix(in srgb, var(--muted) 10%, transparent); border: 1px solid color-mix(in srgb, var(--muted) 18%, transparent);
+}
+.kf-diamond {
+  position: absolute; top: 50%; width: 11px; height: 11px; padding: 0; margin: -5.5px 0 0 -5.5px;
+  transform: rotate(45deg); border-radius: 2px; z-index: 2; cursor: ew-resize;
+  background: var(--kf-color); border: 1.5px solid color-mix(in srgb, var(--kf-color) 55%, #000);
+}
+.kf-diamond:hover:not(:disabled) { background: var(--kf-color); border-color: var(--text); }
+.kf-diamond.selected { border-color: var(--selected-outline); box-shadow: 0 0 0 2px color-mix(in srgb, var(--selected-outline) 45%, transparent); z-index: 3; }
+body.dragging-kf, body.dragging-kf * { cursor: ew-resize !important; }
+.track-btn.expand { min-width: 16px; padding: 0 2px; }
+.kf-actions { display: inline-flex; gap: 2px; padding-right: 6px; margin-right: 2px; border-right: 1px solid var(--border); }
+.kf-actions .track-btn { font-size: 13px; line-height: 20px; }
+.kf-dot { border: 1px solid rgba(0, 0, 0, 0.35); }
+.kf-swatch { width: 12px; height: 12px; padding: 0; border-radius: 3px; border: 1px solid rgba(0, 0, 0, 0.3); flex: none; }
+.kf-swatch:hover:not(:disabled) { border-color: var(--text); }
+.kf-list li { grid-template-columns: auto auto minmax(0, 1fr) auto auto; }
+
+/* ---- Alignment toolbar (above the preview) ---- */
+.preview { flex-direction: column; }
+.align-toolbar {
+  display: flex; align-items: center; gap: 6px; flex: none; flex-wrap: wrap; justify-content: center;
+  padding: 4px 8px; border-bottom: 1px solid var(--border); background: var(--panel);
+}
+.align-label { margin-right: 2px; }
+.align-group { display: flex; gap: 1px; padding: 1px; border: 1px solid var(--border); border-radius: 6px; }
+.align-group .icon-btn { border: none; background: none; padding: 2px 5px; min-width: 26px; display: grid; place-items: center; color: var(--text); }
+.align-group .icon-btn:hover:not(:disabled) { background: var(--hover-bg); }
+
+/* ---- Box selection & multi-select ---- */
+.marquee {
+  position: absolute; z-index: 12; pointer-events: none;
+  border: 1px solid var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); border-radius: 2px;
+}
+body.marquee-selecting, body.marquee-selecting * { cursor: crosshair !important; user-select: none; }
+
+/* ---- Close-gap buttons on clip hover ---- */
+.gap-btn {
+  position: absolute; top: 50%; z-index: 4; transform: translateY(-50%);
+  padding: 0 5px; line-height: 18px; font-size: 12px; border-radius: 4px;
+  background: var(--panel); border: 1px solid var(--border); color: var(--text);
+  opacity: 0; pointer-events: none; transition: opacity 0.1s;
+}
+.gap-btn.left { left: 10px; }
+.gap-btn.right { right: 10px; }
+.clip:hover .gap-btn { opacity: 0.9; pointer-events: auto; }
+.gap-btn:hover:not(:disabled) { opacity: 1; background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+body.dragging-clip .gap-btn, body.marquee-selecting .gap-btn { display: none; }

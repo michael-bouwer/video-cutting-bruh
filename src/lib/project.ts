@@ -65,6 +65,7 @@ function migrate(data: ProjectFile): ProjectFile {
       fadeIn: 0,
       fadeOut: 0,
       transitionIn: { type: "cut", duration: 1 },
+      effects: [],
       ...c,
       base: { ...defaultBase(), ...c.base },
       keyframes: { ...emptyKeyframes(), ...c.keyframes },

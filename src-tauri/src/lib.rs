@@ -87,7 +87,8 @@ pub fn run() {
             project::autosave_clear,
             cache::proxy_cache_info,
             cache::clean_proxy_cache,
-            cache::adopt_proxies
+            cache::adopt_proxies,
+            cache::save_screenshot
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

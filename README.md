@@ -30,6 +30,22 @@ A cross-platform (Windows / macOS / Linux) video editor built with Tauri 2 + Rea
   - Click ◆ to keyframe a property at the playhead.
   - Once a property has keyframes, editing its value writes a keyframe.
   - You can drag the preview to move the selected clip.
+- **Effects** (✦ Effects button in the inspector's tab bar opens a panel to the left of the inspector). Every parameter is keyframeable (◆, ‹ ›, easing), and effects can be bypassed, reordered and reset.
+  - **Video and images:** brightness, contrast, saturation, hue shift, blur, black & white, sepia, invert and vignette. They render through canvas filters.
+  - **Audio:** gain (dB, can boost above 100%), pan, low cut, high cut, bass, treble and echo. They run through Web Audio.
+  - Effects carry over when you split or duplicate a clip.
+- **Selecting several things:** drag on empty timeline space (track or keyframe lanes) to draw a selection box; it selects every clip and keyframe it touches. Shift or Ctrl/⌘ while starting the box, or Shift/Ctrl/⌘-click, adds to the selection. Dragging any selected clip moves the whole selection (with linked audio/video), and Delete removes it. A plain click on empty space still moves the playhead.
+- **Closing gaps:** hover a segment with empty space before it and click **⇤** to slide it left against the previous segment (or 0). **Shift+⇤** also pulls everything after it on the track (ripple). **⇥** slides a segment right against the next one.
+- **Deleting a segment after a split:** a split pins the animated value at the cut on both halves. Deleting one half also removes that pinned keyframe from the other half, so nothing from the deleted segment is left behind. Pins you've edited are kept.
+- **Keyframe lanes:** click ▸ on a track header to show one lane per animated property (transform, volume, and each effect parameter) under the track.
+  - Click a keyframe to select it; Shift or Ctrl/⌘-click adds to the selection, and Ctrl/⌘+A selects every keyframe on the same clips.
+  - Drag to move the whole selection. It snaps to the playhead, clip edges and other keyframes; hold Alt to drag without snapping.
+  - Ctrl/⌘+C, X and V copy, cut and paste. Pasting goes into the selected clip at the playhead with the spacing kept, and adds a missing effect if needed.
+  - Delete removes the selected keyframes, and double-clicking a keyframe jumps the playhead to it.
+  - Every keyframe gets a random colour when it's created, the same everywhere it appears (lanes, clip markers, ◆ buttons, the inspector's list). Click its swatch in the list for a new colour.
+- **Alignment toolbar** (above the preview), for the selected clip at the playhead: align left/centre/right and top/middle/bottom, plus Fit, Fill and Reset. It accounts for scale and rotation, and animated properties get a keyframe at the playhead.
+- **Number fields:** drag left or right on any number field to change it (Shift: faster, Alt: finer), or click it to type. Arrow keys step the value while typing. Sliders work as before.
+- **Timeline actions:** **✂ Split** cuts at the playhead: the selected clip with its linked clip, or with nothing selected, every clip under the playhead. **📷 Screenshot** saves the current preview frame (with effects, at project resolution) as a PNG and adds it to the media bin. Saved projects keep screenshots in `<project folder>/Screenshots/`.
 - **Editing:** split at the playhead (`S`): the selected clip and its link, or everything under the playhead. Duplicate (Ctrl/⌘+D), delete (Del).
 
 - **Projects:** New / Open / Save / Save As (`.vcbproj`, JSON), plus recent projects in the File menu and on the start screen.
@@ -86,6 +102,10 @@ src/
   lib/timeline.ts      clip layout (transitions = overlap), frame lookup, timecode
   lib/keyframes.ts     interpolation + easing
   lib/props.ts         registry of animatable properties  ← add new keyframeable props here
+  lib/effects.ts       effect registry, canvas filter/vignette rendering, Web Audio effect chains  ← add effects here
+  lib/screenshot.ts    capture the preview frame as a PNG image asset
+  lib/keyframeClipboard.ts  copy/paste of keyframes selected in the timeline lanes
+  lib/marquee.ts       box selection of clips and keyframes in the timeline
   lib/transitions.ts   transition renderers               ← add new transitions here
   lib/mediaDrag.ts     dragging media from the bin onto the timeline (pointer-based)
   lib/media.ts         import pipeline (Tauri paths / browser files), proxies, project media restore, relink

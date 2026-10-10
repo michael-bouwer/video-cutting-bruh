@@ -1,4 +1,4 @@
-import type { AnimProp, Clip, Easing, Keyframe } from "../types";
+import type { AnimProp, Clip, Easing, Effect, Keyframe } from "../types";
 import { PROP_KEYS } from "./props";
 
 export const EASINGS: { key: Easing; label: string }[] = [
@@ -8,6 +8,19 @@ export const EASINGS: { key: Easing; label: string }[] = [
   { key: "easeInOut", label: "Ease in-out" },
   { key: "hold", label: "Hold" },
 ];
+
+/** A random, readable keyframe colour (varied hue, fixed saturation/lightness). */
+export function randomKeyframeColor(): string {
+  return `hsl(${Math.floor(Math.random() * 360)} 85% 62%)`;
+}
+
+/** A keyframe's colour; older projects without one get a stable colour from the id. */
+export function keyframeColor(kf: Keyframe): string {
+  if (kf.color) return kf.color;
+  let h = 0;
+  for (const ch of kf.id) h = (h * 31 + ch.charCodeAt(0)) % 360;
+  return `hsl(${h} 85% 62%)`;
+}
 
 export function ease(kind: Easing, p: number): number {
   switch (kind) {
@@ -24,10 +37,9 @@ export function ease(kind: Easing, p: number): number {
   }
 }
 
-/** Interpolated value of `prop` at clip-local time `t`. */
-export function valueAt(clip: Clip, prop: AnimProp, t: number): number {
-  const kfs = clip.keyframes[prop];
-  if (kfs.length === 0) return clip.base[prop];
+/** Interpolated value of a keyframe track at clip-local time `t` (`base` if it has no keyframes). */
+export function interpolate(kfs: Keyframe[], base: number, t: number): number {
+  if (kfs.length === 0) return base;
   if (t <= kfs[0].t) return kfs[0].v;
   const last = kfs[kfs.length - 1];
   if (t >= last.t) return last.v;
@@ -42,6 +54,16 @@ export function valueAt(clip: Clip, prop: AnimProp, t: number): number {
   return last.v;
 }
 
+/** Interpolated value of `prop` at clip-local time `t`. */
+export function valueAt(clip: Clip, prop: AnimProp, t: number): number {
+  return interpolate(clip.keyframes[prop], clip.base[prop], t);
+}
+
+/** Value of an effect parameter at clip-local time `t`. */
+export function effectValueAt(fx: Effect, key: string, t: number): number {
+  return interpolate(fx.keyframes[key] ?? [], fx.params[key] ?? 0, t);
+}
+
 export function transformAt(clip: Clip, t: number): Record<AnimProp, number> {
   return Object.fromEntries(PROP_KEYS.map((k) => [k, valueAt(clip, k, t)])) as Record<AnimProp, number>;
 }
@@ -54,11 +76,4 @@ export function keyframeNear(kfs: Keyframe[], t: number, fps: number): Keyframe 
 
 export function sortKeyframes(kfs: Keyframe[]): Keyframe[] {
   return [...kfs].sort((a, b) => a.t - b.t);
-}
-
-/** Sorted, de-duplicated times of every keyframe on a clip (for timeline markers). */
-export function allKeyframeTimes(clip: Clip): number[] {
-  const set = new Set<number>();
-  for (const k of PROP_KEYS) for (const kf of clip.keyframes[k]) set.add(Math.round(kf.t * 1000) / 1000);
-  return [...set].sort((a, b) => a - b);
 }

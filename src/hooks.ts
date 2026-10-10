@@ -9,6 +9,21 @@ import { redo, undo } from "./lib/history";
 import { newProject, openProject, saveProject } from "./lib/project";
 import { openImportDialog } from "./lib/media";
 import { zoomToFit } from "./components/Timeline";
+import { copyKeyframes, hasCopiedKeyframes, pasteKeyframes } from "./lib/keyframeClipboard";
+import type { KeyframeRef } from "./types";
+
+/** Ctrl+A in the lanes: extend the keyframe selection to every keyframe on the same clips. */
+function selectAllKeyframesOnSameClips() {
+  const s = useStore.getState();
+  const clipIds = new Set(s.kfSelection.map((r) => r.clipId));
+  const refs: KeyframeRef[] = [];
+  for (const c of s.clips) {
+    if (!clipIds.has(c.id)) continue;
+    for (const [key, kfs] of Object.entries(c.keyframes)) for (const kf of kfs) refs.push({ clipId: c.id, fx: null, key, kfId: kf.id });
+    for (const fx of c.effects) for (const [key, kfs] of Object.entries(fx.keyframes)) for (const kf of kfs) refs.push({ clipId: c.id, fx: fx.id, key, kfId: kf.id });
+  }
+  s.selectKeyframes(refs);
+}
 
 export type DropZone = "timeline" | "bin" | null;
 
@@ -117,6 +132,10 @@ export function useShortcuts() {
         if (!typing && key === "z") return run(e.shiftKey ? redo : undo);
         if (!typing && key === "y") return run(redo);
         if (!typing && key === "d" && s.selection?.kind === "clip") return run(() => s.duplicateClip(s.selection!.clipId));
+        // Keyframes selected in the timeline's keyframe lanes.
+        if (!typing && (key === "c" || key === "x") && s.kfSelection.length) return run(() => copyKeyframes(key === "x"));
+        if (!typing && key === "v" && hasCopiedKeyframes()) return run(pasteKeyframes);
+        if (!typing && key === "a" && s.kfSelection.length) return run(selectAllKeyframesOnSameClips);
         // Accidental reloads would throw away the edit (allowed in dev for HMR work).
         if ((key === "r" || key === "p" || key === "f") && !import.meta.env.DEV) return e.preventDefault();
         return;
@@ -148,8 +167,17 @@ export function useShortcuts() {
         }
         case "Delete":
         case "Backspace":
+          if (s.clipSelection.length > 1 || (s.clipSelection.length && s.kfSelection.length)) {
+            // A box selection can hold clips and keyframes: remove the clips, then any other keyframes.
+            const ids = [...s.clipSelection];
+            s.removeClips(ids);
+            const rest = useStore.getState().kfSelection;
+            if (rest.length) useStore.getState().deleteKeyframes(rest);
+          }
+          // Selected keyframes take priority over the clip they belong to.
+          else if (s.kfSelection.length) s.deleteKeyframes(s.kfSelection);
           // Shift+Delete removes only this clip, leaving its linked video/audio.
-          if (s.selection?.kind === "clip") s.removeClip(s.selection.clipId, e.shiftKey);
+          else if (s.selection?.kind === "clip") s.removeClip(s.selection.clipId, e.shiftKey);
           else if (s.selection?.kind === "transition") {
             s.setTransition(s.selection.clipId, { type: "cut" });
             s.select(null);
@@ -172,7 +200,9 @@ export function useShortcuts() {
           s.seek(Infinity);
           break;
         case "Escape":
-          s.select(null);
+          if (s.kfSelection.length) s.selectKeyframes([]);
+          else s.select(null);
+          s.selectClips([]);
           break;
         case "\\":
           zoomToFit();

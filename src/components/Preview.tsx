@@ -7,6 +7,7 @@ import { openImportDialog } from "../lib/media";
 import { getRecent, newProject, openProject } from "../lib/project";
 import { kbd } from "./ui";
 import { tip } from "./Tooltip";
+import { AlignToolbar } from "./AlignToolbar";
 
 export function Preview() {
   const { width, height, allowHdr } = useStore((s) => s.settings);
@@ -71,6 +72,7 @@ export function Preview() {
 
   return (
     <section className="preview">
+      <AlignToolbar />
       <div className="preview-stage">
         <canvas
           key={colorSpace}

@@ -11,11 +11,12 @@ interface Placed {
   end: number;
   duration: number;
 }
-import { EASINGS, keyframeNear, valueAt } from "../lib/keyframes";
+import { EASINGS, keyframeColor, keyframeNear, valueAt } from "../lib/keyframes";
 import { TRANSITIONS } from "../lib/transitions";
 import { hdrLabel } from "../lib/media";
 import type { Easing, TransitionType } from "../types";
 import { kbd } from "./ui";
+import { NumberField } from "./NumberField";
 import { ProjectPanel } from "./ProjectPanel";
 import { tip } from "./Tooltip";
 
@@ -27,6 +28,9 @@ export function Inspector() {
   const tab = useStore((s) => s.rightTab);
   const setTab = useStore((s) => s.setRightTab);
   const hasSelection = useStore((s) => s.selection !== null);
+  const effectsOpen = useStore((s) => s.effectsOpen);
+  const setEffectsOpen = useStore((s) => s.setEffectsOpen);
+  const fxCount = useStore((s) => (s.selection?.kind === "clip" ? (s.clips.find((c) => c.id === s.selection!.clipId)?.effects.length ?? 0) : 0));
   const tabs = [
     { key: "inspector" as const, label: "Inspector", tip: "Properties of the selected clip or transition" },
     { key: "project" as const, label: "Project", tip: "Resolution, frame rate, HDR, preview proxies and storage for this project" },
@@ -47,6 +51,15 @@ export function Inspector() {
             {t.key === "inspector" && hasSelection && tab !== "inspector" && <span className="tab-dot" />}
           </button>
         ))}
+        <button
+          className={`tab fx-toggle ${effectsOpen ? "active-fx" : ""}`}
+          aria-pressed={effectsOpen}
+          onClick={() => setEffectsOpen(!effectsOpen)}
+          {...tip("Show or hide the effects panel: brightness, blur, vignette… for video and images; gain, EQ, echo… for audio — all keyframeable.", { title: "Effects" })}
+        >
+          <span className="fx-toggle-arrow">{effectsOpen ? "◂" : "▸"} </span>✦<span className="fx-toggle-label"> Effects</span>
+          {fxCount > 0 && <span className="fx-count">{fxCount}</span>}
+        </button>
       </div>
       <div className="panel tab-body" role="tabpanel">
         {tab === "project" ? <ProjectPanel /> : <InspectorBody />}
@@ -194,27 +207,31 @@ function ClipInspector({ placed }: { placed: Placed }) {
       </div>
       <div className="field">
         <label>In</label>
-        <input
-          type="number"
-          step={1 / fps}
+        <NumberField
+          value={clip.trimIn}
           min={0}
-          value={clip.trimIn.toFixed(3)}
-          {...tip("Start point in the source file (seconds). Keyframes stay on the same video frames when you trim.")}
-          onChange={(e) => trimClip(clip.id, Number(e.target.value), clip.trimOut)}
+          max={clip.trimOut - 0.1}
+          step={0.01}
+          precision={3}
+          unit="s"
+          onChange={(v) => trimClip(clip.id, v, clip.trimOut)}
+          aria-label="In point"
+          {...tip("Start point in the source file (seconds). Keyframes stay on the same video frames when you trim. Drag left/right to change (Shift: faster, Alt: finer), or click to type.")}
         />
-        <span className="value">s</span>
       </div>
       <div className="field">
         <label>Out</label>
-        <input
-          type="number"
-          step={1 / fps}
-          max={media?.duration}
-          value={clip.trimOut.toFixed(3)}
-          {...tip(`End point in the source file (seconds), up to ${media?.duration.toFixed(2) ?? "?"}s`)}
-          onChange={(e) => trimClip(clip.id, clip.trimIn, Number(e.target.value))}
+        <NumberField
+          value={clip.trimOut}
+          min={clip.trimIn + 0.1}
+          max={media?.kind === "image" ? 3600 : (media?.duration ?? clip.trimOut)}
+          step={0.01}
+          precision={3}
+          unit="s"
+          onChange={(v) => trimClip(clip.id, clip.trimIn, v)}
+          aria-label="Out point"
+          {...tip(`End point in the source file (seconds), up to ${media?.duration.toFixed(2) ?? "?"}s. Drag left/right to change (Shift: faster, Alt: finer), or click to type.`)}
         />
-        <span className="value">s</span>
       </div>
 
       {isAudio && (
@@ -222,27 +239,31 @@ function ClipInspector({ placed }: { placed: Placed }) {
           <div className="section-title">Fades</div>
           <div className="field">
             <label>Fade in</label>
-            <input
-              type="number"
+            <NumberField
+              value={clip.fadeIn}
               min={0}
-              step={0.1}
-              value={clip.fadeIn.toFixed(2)}
-              onChange={(e) => setFades(clip.id, { fadeIn: Number(e.target.value) })}
-              {...tip("Seconds to fade up from silence. You can also drag the small handle at the clip's top-left on the timeline.")}
+              max={placed.duration}
+              step={0.05}
+              precision={2}
+              unit="s"
+              onChange={(v) => setFades(clip.id, { fadeIn: v })}
+              aria-label="Fade in"
+              {...tip("Seconds to fade up from silence. You can also drag the small handle at the clip's top-left on the timeline. Drag left/right to change (Shift: faster, Alt: finer), or click to type.")}
             />
-            <span className="value">s</span>
           </div>
           <div className="field">
             <label>Fade out</label>
-            <input
-              type="number"
+            <NumberField
+              value={clip.fadeOut}
               min={0}
-              step={0.1}
-              value={clip.fadeOut.toFixed(2)}
-              onChange={(e) => setFades(clip.id, { fadeOut: Number(e.target.value) })}
-              {...tip("Seconds to fade down to silence at the end. You can also drag the handle at the clip's top-right.")}
+              max={placed.duration}
+              step={0.05}
+              precision={2}
+              unit="s"
+              onChange={(v) => setFades(clip.id, { fadeOut: v })}
+              aria-label="Fade out"
+              {...tip("Seconds to fade down to silence at the end. You can also drag the handle at the clip's top-right. Drag left/right to change (Shift: faster, Alt: finer), or click to type.")}
             />
-            <span className="value">s</span>
           </div>
         </>
       )}
@@ -305,6 +326,7 @@ function PropRow({ def, placed, local }: { def: PropDef; placed: Placed; local: 
       <div className="prop-head">
         <button
           className={`kf-toggle ${here ? "on" : kfs.length ? "animated" : ""}`}
+          style={here ? { color: keyframeColor(here) } : undefined}
           onClick={() => toggleKeyframe(clip.id, def.key, local)}
           {...tip(
             here
@@ -324,14 +346,19 @@ function PropRow({ def, placed, local }: { def: PropDef; placed: Placed; local: 
         <button className="kf-nav" disabled={!next} onClick={() => next && seek(placed.start + next.t)} {...tip("Jump to the next keyframe", { label: "Next keyframe" })}>
           ›
         </button>
-        <input
+        <NumberField
           className="prop-number"
-          type="number"
+          value={value}
+          min={def.min === -100 ? -1000 : def.min}
+          max={def.key === "scale" ? 2000 : def.max}
           step={def.step}
-          value={Math.round(value * 100) / 100}
-          onChange={(e) => set(Number(e.target.value))}
+          // Drag speed follows the slider's range even though typing can go beyond it.
+          perPx={Math.max(def.step / 2, (def.max - def.min) / 600)}
+          unit={def.unit}
+          onChange={set}
+          aria-label={def.label}
+          {...tip("Drag left/right to change (Shift: faster, Alt: finer), or click to type. Typed values can go beyond the slider's range.")}
         />
-        <span className="unit">{def.unit}</span>
       </div>
       <div className="prop-body">
         <input type="range" min={def.min} max={def.max} step={def.step} value={value} onChange={(e) => set(Number(e.target.value))} />
@@ -359,6 +386,7 @@ function KeyframeList({ placed }: { placed: Placed }) {
   const fps = useStore((s) => s.settings.fps);
   const seek = useStore((s) => s.seek);
   const removeKeyframe = useStore((s) => s.removeKeyframe);
+  const rerollKeyframeColor = useStore((s) => s.rerollKeyframeColor);
   const rows = propsFor(placed.track.kind)
     .flatMap((def) => clip.keyframes[def.key].map((kf) => ({ def, kf })))
     .sort((a, b) => a.kf.t - b.kf.t);
@@ -371,6 +399,12 @@ function KeyframeList({ placed }: { placed: Placed }) {
       <ul className="kf-list">
         {rows.map(({ def, kf }) => (
           <li key={kf.id}>
+            <button
+              className="kf-swatch"
+              style={{ background: keyframeColor(kf) }}
+              onClick={() => rerollKeyframeColor({ clipId: clip.id, fx: null, key: def.key, kfId: kf.id })}
+              {...tip("This keyframe's colour (the same in the timeline lanes). Click for a new random colour.", { label: "New colour" })}
+            />
             <button className="link" onClick={() => seek(placed.start + kf.t)} {...tip("Move the playhead to this keyframe")}>
               {formatTime(kf.t, fps)}
             </button>

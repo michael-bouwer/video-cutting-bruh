@@ -8,12 +8,17 @@ import {
   snap,
   snapPoints,
   timelineEnd,
+  TOUCH_EPS,
+  trackClips,
   transitionLength,
 } from "../lib/timeline";
-import { allKeyframeTimes } from "../lib/keyframes";
+import { keyframeColor } from "../lib/keyframes";
+import { KeyframeActions, KeyframeLanes } from "./KeyframeLanes";
 import { transitionLabel } from "../lib/transitions";
 import { ask } from "../lib/dialog";
 import { tip } from "./Tooltip";
+import { createScreenshot } from "../lib/screenshot";
+import { onMarquee, startMarquee, type MarqueeBox } from "../lib/marquee";
 import type { Clip, Track } from "../types";
 
 const TICK_STEPS = [0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600];
@@ -86,9 +91,15 @@ export function Timeline() {
   const setSnapping = useStore((s) => s.setSnapping);
   const addTrack = useStore((s) => s.addTrack);
   const mediaDrag = useStore((s) => s.mediaDrag);
+  const showKfActions = useStore((s) => s.kfSelection.length > 0 || Object.values(s.expandedTracks).some(Boolean));
   const scrollRef = useRef<HTMLDivElement>(null);
   /** Vertical snap guide (seconds) while dragging. */
   const [snapLine, setSnapLine] = useState<number | null>(null);
+  const [marquee, setMarquee] = useState<MarqueeBox | null>(null);
+  useEffect(() => {
+    onMarquee(setMarquee);
+    return () => onMarquee(null);
+  }, []);
 
   const total = timelineEnd(clips);
   const visibleSeconds = (scrollRef.current?.clientWidth ?? 1200) / zoom;
@@ -97,6 +108,18 @@ export function Timeline() {
   const step = TICK_STEPS.find((s) => s * zoom >= 70) ?? 1200;
   const ticks: number[] = [];
   for (let t = 0; t <= contentSeconds; t += step) ticks.push(t);
+
+  /** Empty timeline space: drag = box-select, click = move the playhead there and deselect. */
+  const background = (e: React.PointerEvent) => {
+    const t = timeAtClientX(e.clientX);
+    startMarquee(e, () => {
+      const st = useStore.getState();
+      st.setPlaying(false);
+      st.seek(t);
+      st.select(null);
+      st.selectKeyframes([]);
+    });
+  };
 
   const scrub = (e: React.PointerEvent) => {
     if (e.button !== 0) return;
@@ -123,8 +146,24 @@ export function Timeline() {
     <section className={`timeline ${mediaDrag?.over ? "media-drop" : ""}`} data-drop-zone="timeline">
       <div className="timeline-header">
         <span className="panel-title">Timeline</span>
+        <div className="timeline-actions">
+          {showKfActions && <KeyframeActions />}
+          <button
+            className="split-btn"
+            onClick={() => useStore.getState().splitAtPlayhead()}
+            {...tip("Cut at the playhead: splits the selected clip (and its linked audio/video) — or, with nothing selected, every clip under the playhead on all tracks.", { title: "Split at playhead", kbd: "S", label: "Split at playhead" })}
+          >
+            ✂ Split
+          </button>
+          <button
+            onClick={createScreenshot}
+            {...tip("Save the current preview frame (with effects, at project resolution) as a PNG and add it to the media bin as an image.", { title: "Create screenshot", label: "Create screenshot" })}
+          >
+            📷 Screenshot
+          </button>
+        </div>
         <span className="muted small timeline-hint">
-          Drag clips anywhere · drag edges to trim (drag back to restore) · {ALT} while dragging: no snapping
+          Drag clips anywhere · drag on empty space to box-select · Shift-click adds · drag edges to trim · {ALT}: no snapping
         </span>
         <div className="timeline-tools">
           <button onClick={() => addTrack("video")} {...tip("Add a video track. Higher video tracks are drawn on top of lower ones.", { title: "Add video track" })}>
@@ -156,7 +195,12 @@ export function Timeline() {
       </div>
 
       <div className="timeline-scroll" ref={scrollRef} onWheel={onWheel}>
-        <div className="timeline-content" style={{ width: HEADER_W + laneWidth }}>
+        <div
+          className="timeline-content"
+          style={{ width: HEADER_W + laneWidth }}
+          // Empty space below the tracks also box-selects.
+          onPointerDown={(e) => e.target === e.currentTarget && background(e)}
+        >
           <div className="tl-row ruler-row">
             <div className="track-header corner">
               <TimecodeReadout />
@@ -172,7 +216,7 @@ export function Timeline() {
 
           <NewTrackZone kind="video" width={laneWidth} />
           {rows.map((track) => (
-            <TrackRow key={track.id} track={track} clips={clips} zoom={zoom} laneWidth={laneWidth} onSnapLine={setSnapLine} onScrub={scrub} />
+            <TrackWithLanes key={track.id} track={track} clips={clips} zoom={zoom} laneWidth={laneWidth} onSnapLine={setSnapLine} onBackground={background} />
           ))}
           <NewTrackZone kind="audio" width={laneWidth} />
           {clips.length === 0 && !mediaDrag && (
@@ -180,6 +224,7 @@ export function Timeline() {
           )}
 
           {snapLine !== null && <div className="snap-line" style={{ left: HEADER_W + snapLine * zoom }} />}
+          {marquee && <div className="marquee" style={marquee} />}
           <Playhead zoom={zoom} scrollRef={scrollRef} onScrub={scrub} />
         </div>
       </div>
@@ -237,20 +282,31 @@ function NewTrackZone({ kind, width }: { kind: "video" | "audio"; width: number 
 
 // ---- Tracks ------------------------------------------------------------------------------------
 
+/** A track row plus, when expanded, its keyframe lanes. */
+function TrackWithLanes(props: Parameters<typeof TrackRow>[0]) {
+  const expanded = useStore((s) => !!s.expandedTracks[props.track.id]);
+  return (
+    <>
+      <TrackRow {...props} />
+      {expanded && <KeyframeLanes track={props.track} laneWidth={props.laneWidth} zoom={props.zoom} onBackground={props.onBackground} />}
+    </>
+  );
+}
+
 function TrackRow({
   track,
   clips,
   zoom,
   laneWidth,
   onSnapLine,
-  onScrub,
+  onBackground,
 }: {
   track: Track;
   clips: Clip[];
   zoom: number;
   laneWidth: number;
   onSnapLine: (t: number | null) => void;
-  onScrub: (e: React.PointerEvent) => void;
+  onBackground: (e: React.PointerEvent) => void;
 }) {
   const own = clips.filter((c) => c.trackId === track.id);
   const mediaDrag = useStore((s) => s.mediaDrag);
@@ -258,8 +314,7 @@ function TrackRow({
 
   const onLaneDown = (e: React.PointerEvent) => {
     if (e.target !== e.currentTarget) return;
-    useStore.getState().select(null);
-    onScrub(e);
+    onBackground(e);
   };
 
   return (
@@ -304,8 +359,18 @@ function TrackHeader({ track, count }: { track: Track; count: number }) {
     removeTrack(track.id);
   };
 
+  const expanded = useStore((s) => !!s.expandedTracks[track.id]);
+  const toggleExpanded = useStore((s) => s.toggleTrackExpanded);
   return (
     <div className="track-header">
+      <button
+        className={`track-btn expand ${expanded ? "on" : ""}`}
+        aria-expanded={expanded}
+        onClick={() => toggleExpanded(track.id)}
+        {...tip(expanded ? "Hide keyframe lanes" : "Show this track's keyframes in lanes below it — drag them, copy & paste them", { label: "Toggle keyframe lanes" })}
+      >
+        {expanded ? "▾" : "▸"}
+      </button>
       <span className={`track-name ${track.kind}`} {...tip(track.kind === "video" ? "Video track. Higher tracks are drawn on top." : "Audio track. All audio tracks are mixed together.")}>
         {track.name}
       </span>
@@ -365,7 +430,16 @@ function TrackHeader({ track, count }: { track: Track; count: number }) {
 function ClipBlock({ clip, track, zoom, onSnapLine }: { clip: Clip; track: Track; zoom: number; onSnapLine: (t: number | null) => void }) {
   const media = useStore((s) => s.media.find((m) => m.id === clip.mediaId));
   const mediaIndex = useStore((s) => s.media.findIndex((m) => m.id === clip.mediaId));
-  const selected = useStore((s) => s.selection?.kind === "clip" && s.selection.clipId === clip.id);
+  const selected = useStore((s) => s.clipSelection.includes(clip.id) || (s.selection?.kind === "clip" && s.selection.clipId === clip.id));
+  // Gaps around this segment on its track (for the close-gap buttons).
+  const gapLeft = useStore((s) => {
+    const prevEnd = Math.max(0, ...trackClips(s.clips, clip.trackId).filter((c) => c.id !== clip.id && clipEnd(c) <= clip.start + TOUCH_EPS).map(clipEnd));
+    return clip.start - prevEnd > TOUCH_EPS ? clip.start - prevEnd : 0;
+  });
+  const gapRight = useStore((s) => {
+    const next = trackClips(s.clips, clip.trackId).find((c) => c.id !== clip.id && c.start >= clipEnd(clip) - TOUCH_EPS);
+    return next && next.start - clipEnd(clip) > TOUCH_EPS ? next.start - clipEnd(clip) : 0;
+  });
   const linkedSelected = useStore((s) => {
     if (!clip.linkId || s.selection?.kind !== "clip" || s.selection.clipId === clip.id) return false;
     return s.clips.find((c) => c.id === s.selection!.clipId)?.linkId === clip.linkId;
@@ -375,7 +449,11 @@ function ClipBlock({ clip, track, zoom, onSnapLine }: { clip: Clip; track: Track
   const left = clip.start * zoom;
   const width = Math.max(4, dur * zoom);
   const hue = HUES[Math.max(0, mediaIndex) % HUES.length];
-  const kfTimes = allKeyframeTimes(clip);
+  // Every keyframe on the clip (transform + effects), in its own colour.
+  const kfDots = [
+    ...Object.values(clip.keyframes).flat(),
+    ...clip.effects.flatMap((fx) => Object.values(fx.keyframes).flat()),
+  ].filter((kf) => kf.t >= -1e-6 && kf.t <= dur + 1e-6);
   const editable = !track.locked;
 
   const pointsFor = () => {
@@ -385,10 +463,47 @@ function ClipBlock({ clip, track, zoom, onSnapLine }: { clip: Clip; track: Track
 
   const onBodyDown = (e: React.PointerEvent) => {
     if (e.button !== 0) return;
-    useStore.getState().select({ kind: "clip", clipId: clip.id });
+    const st0 = useStore.getState();
+    st0.selectKeyframes([]);
+    // Shift/Ctrl/⌘-click adds or removes the clip from a multi-selection.
+    if (e.shiftKey || e.ctrlKey || e.metaKey) {
+      e.stopPropagation();
+      st0.selectClips([clip.id], "toggle");
+      return;
+    }
+    const multi = st0.clipSelection.length > 1 && st0.clipSelection.includes(clip.id);
+    if (multi) useStore.setState({ selection: { kind: "clip", clipId: clip.id }, rightTab: "inspector" });
+    else st0.select({ kind: "clip", clipId: clip.id });
     if (!editable) return e.stopPropagation();
     const origStart = clip.start;
     const points = pointsFor();
+
+    if (multi) {
+      // Move every selected clip by the same amount (no track changes for a group).
+      const ids = [...st0.clipSelection];
+      const groupPoints = snapPoints(st0.clips, new Set(ids.flatMap((id) => {
+        const c = st0.clips.find((x) => x.id === id);
+        return c ? groupOf(st0.clips, c).map((x) => x.id) : [];
+      })), st0.currentTime);
+      dragPointer(
+        e,
+        (dx, ev) => {
+          const st = useStore.getState();
+          let desired = origStart + dx / st.zoom;
+          let line: number | null = null;
+          if (st.snapping && !ev.altKey) ({ start: desired, line } = snapRange(desired, dur, groupPoints, st.zoom));
+          onSnapLine(line);
+          const now = st.clips.find((c) => c.id === clip.id)?.start ?? origStart;
+          st.moveClipsBy(ids, desired - now);
+          document.body.classList.add("dragging-clip");
+        },
+        () => {
+          onSnapLine(null);
+          document.body.classList.remove("dragging-clip");
+        },
+      );
+      return;
+    }
     dragPointer(
       e,
       (dx, ev) => {
@@ -452,6 +567,7 @@ function ClipBlock({ clip, track, zoom, onSnapLine }: { clip: Clip; track: Track
   const isAudio = track.kind === "audio";
   return (
     <div
+      data-clip-id={clip.id}
       className={`clip ${track.kind} ${selected ? "selected" : ""} ${linkedSelected ? "linked-selected" : ""} ${!media || media.status === "missing" ? "missing" : ""} ${editable ? "" : "locked"}`}
       style={{ left, width, ["--clip-hue" as string]: hue }}
       onPointerDown={onBodyDown}
@@ -460,6 +576,26 @@ function ClipBlock({ clip, track, zoom, onSnapLine }: { clip: Clip; track: Track
         { title: media?.name ?? "Missing media" },
       )}
     >
+      {editable && gapLeft > 0 && (
+        <button
+          className="gap-btn left"
+          onPointerDown={(e) => e.stopPropagation()}
+          onClick={(e) => useStore.getState().closeGap(clip.id, "left", e.shiftKey)}
+          {...tip(`Close the ${gapLeft.toFixed(2)}s gap before this segment by moving it left. Shift+click also pulls everything after it along (ripple).`, { title: "Close gap", label: "Close gap before" })}
+        >
+          ⇤
+        </button>
+      )}
+      {editable && gapRight > 0 && (
+        <button
+          className="gap-btn right"
+          onPointerDown={(e) => e.stopPropagation()}
+          onClick={() => useStore.getState().closeGap(clip.id, "right")}
+          {...tip(`Close the ${gapRight.toFixed(2)}s gap after this segment by moving it right, up to the next one.`, { title: "Close gap", label: "Close gap after" })}
+        >
+          ⇥
+        </button>
+      )}
       {editable && <div className="trim-handle in" onPointerDown={onTrim("in")} {...tip("Drag to trim the start. Drag back out to restore what was cut.")} />}
       <div className="clip-label">
         <span>
@@ -482,8 +618,8 @@ function ClipBlock({ clip, track, zoom, onSnapLine }: { clip: Clip; track: Track
         </>
       ) : (
         <div className="kf-row">
-          {kfTimes.map((t) => (
-            <span key={t} className="kf-dot" style={{ left: t * zoom }} />
+          {kfDots.map((kf) => (
+            <span key={kf.id} className="kf-dot" style={{ left: kf.t * zoom, background: keyframeColor(kf) }} />
           ))}
         </div>
       )}

@@ -158,3 +158,38 @@ mod tests {
         assert_eq!(stable_hash("a"), 0xaf63dc4c8601ec8c);
     }
 }
+
+/// Saves a PNG of the preview (sent as base64) and returns its path.
+/// Saved projects keep screenshots next to the project file in `Screenshots/`;
+/// unsaved projects use a temporary app folder.
+#[tauri::command]
+pub fn save_screenshot(app: AppHandle, project_path: Option<String>, name: String, data_base64: String) -> Result<String, String> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data_base64.trim_start_matches("data:image/png;base64,"))
+        .map_err(|e| format!("Invalid image data: {e}"))?;
+    if !bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
+        return Err("Not a PNG image".into());
+    }
+    let dir = match project_path.as_deref() {
+        Some(p) => Path::new(p).parent().ok_or("Invalid project path")?.join("Screenshots"),
+        None => app.path().app_cache_dir().map_err(|e| e.to_string())?.join("screenshots"),
+    };
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+
+    // Keep only safe file-name characters, and never overwrite an existing file.
+    let stem: String = name
+        .trim_end_matches(".png")
+        .chars()
+        .filter(|c| !matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*') && !c.is_control())
+        .collect();
+    let stem = if stem.trim().is_empty() { "Screenshot".to_string() } else { stem.trim().to_string() };
+    let mut path = dir.join(format!("{stem}.png"));
+    let mut n = 2;
+    while path.exists() {
+        path = dir.join(format!("{stem} ({n}).png"));
+        n += 1;
+    }
+    std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
+    Ok(path.to_string_lossy().into_owned())
+}
