@@ -69,7 +69,7 @@ pub fn locate(name: &str) -> Option<PathBuf> {
     candidate_dirs().into_iter().map(|d| d.join(&file)).find(|p| p.is_file())
 }
 
-fn command(bin: &Path) -> Command {
+pub(crate) fn command(bin: &Path) -> Command {
     #[allow(unused_mut)]
     let mut cmd = Command::new(bin);
     #[cfg(windows)]
@@ -103,7 +103,7 @@ static CAPS: OnceLock<Caps> = OnceLock::new();
 
 /// Runs a tiny synthetic encode to see whether a feature actually works on
 /// this machine (an encoder being compiled in doesn't mean the GPU/driver has it).
-fn works(bin: &Path, args: &[&str]) -> bool {
+pub(crate) fn works(bin: &Path, args: &[&str]) -> bool {
     command(bin)
         .args(["-hide_banner", "-loglevel", "error", "-nostdin"])
         .args(args)

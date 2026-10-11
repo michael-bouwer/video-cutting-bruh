@@ -832,3 +832,63 @@ body.marquee-selecting, body.marquee-selecting * { cursor: crosshair !important;
 .clip:hover .gap-btn { opacity: 0.9; pointer-events: auto; }
 .gap-btn:hover:not(:disabled) { opacity: 1; background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
 body.dragging-clip .gap-btn, body.marquee-selecting .gap-btn { display: none; }
+
+/* ---- Timeline stacking: lines and boxes stay under the sticky track headers ---- */
+.track-header { z-index: 7; }
+.ruler-row { z-index: 8; }
+.ruler-row .track-header.corner { z-index: 9; }
+.playhead { z-index: 6; }
+.snap-line { z-index: 6; }
+.marquee { z-index: 6; }
+.ruler .playhead-knob {
+  position: absolute; top: 0; z-index: 2; margin-left: -6px; width: 13px; height: 14px;
+  background: var(--danger); clip-path: polygon(0 0, 100% 0, 100% 60%, 50% 100%, 0 60%); cursor: ew-resize;
+}
+
+/* ---- Easing button + curve editor pop-over ---- */
+.easing-btn { display: inline-flex; align-items: center; gap: 5px; padding: 1px 7px 1px 4px; font-size: 11px; max-width: 120px; min-width: 0; }
+.easing-btn span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.easing-btn .curve-thumb, .curve-preset .curve-thumb { color: var(--accent); flex: none; }
+.curve-popover {
+  position: fixed; z-index: 350; padding: 10px; border-radius: 10px;
+  background: var(--panel-2); border: 1px solid var(--border); box-shadow: 0 16px 40px var(--shadow);
+  max-width: calc(100vw - 16px); max-height: calc(100vh - 16px); overflow: auto;
+}
+.curve-editor { display: flex; gap: 10px; }
+.curve-presets { display: flex; flex-direction: column; gap: 3px; max-height: 330px; overflow-y: auto; padding-right: 2px; }
+.curve-preset { display: flex; align-items: center; gap: 6px; padding: 3px 8px 3px 4px; font-size: 11px; background: var(--panel); text-align: left; }
+.curve-preset.active { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, var(--panel)); }
+.curve-main { display: flex; flex-direction: column; align-items: center; gap: 6px; width: 220px; }
+.curve-preview { position: relative; width: 196px; height: 14px; border-radius: 7px; background: var(--panel); overflow: hidden; }
+.curve-dot {
+  position: absolute; top: 2px; left: 2px; width: 10px; height: 10px; border-radius: 50%; background: var(--accent);
+  animation: curve-move 1.6s infinite alternate;
+}
+@keyframes curve-move { from { left: 2px; } to { left: calc(100% - 12px); } }
+@media (prefers-reduced-motion: reduce) { .curve-dot { animation-duration: 4s; } }
+.curve-graph { width: 196px; height: auto; overflow: visible; touch-action: none; }
+.curve-box { fill: var(--panel); stroke: var(--border); }
+.curve-grid line { stroke: var(--divider-soft); }
+.curve-diagonal { stroke: var(--muted); stroke-dasharray: 3 3; opacity: 0.6; }
+.curve-arm { stroke: var(--accent); stroke-width: 1.5; }
+.curve-line { fill: none; stroke: var(--text); stroke-width: 2.5; stroke-linecap: round; }
+.curve-end { fill: var(--text); }
+.curve-handle { fill: var(--accent); stroke: var(--panel-2); stroke-width: 2; cursor: grab; }
+.curve-handle:hover { fill: var(--accent-hover); }
+.curve-label { font-size: 12px; text-align: center; }
+.curve-numbers { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 4px; width: 100%; }
+
+/* ---- Export dialog ---- */
+.export-modal { width: min(520px, 100%); }
+.export-modal .form-row select, .export-modal .form-row .path-picker { width: 100%; min-width: 0; }
+.checkbox-row { display: flex; align-items: center; gap: 8px; }
+.quality-seg { justify-self: start; }
+.quality-seg button { padding: 3px 12px; }
+.export-summary { margin: 4px 0 10px 90px !important; }
+.export-warn { color: var(--accent-2); margin: 6px 0 !important; }
+.export-phase { font-weight: 600; margin-bottom: 8px !important; }
+.export-bar { height: 10px; border-radius: 5px; background: var(--bg); overflow: hidden; margin-bottom: 8px; border: 1px solid var(--border); }
+.export-bar > div { height: 100%; background: var(--accent); transition: width 0.2s; }
+.export-stats { font-variant-numeric: tabular-nums; }
+.export-path { font-family: ui-monospace, "Cascadia Mono", Menlo, Consolas, monospace; font-size: 12px; overflow-wrap: anywhere; color: var(--text) !important; }
+.export-btn { padding: 4px 12px; }

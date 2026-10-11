@@ -8,6 +8,14 @@ import { keyframeNear } from "./lib/keyframes";
 import { redo, undo } from "./lib/history";
 import { newProject, openProject, saveProject } from "./lib/project";
 import { openImportDialog } from "./lib/media";
+
+/** Opens the export dialog (desktop app only, needs something on the timeline). */
+export function openExport() {
+  const s = useStore.getState();
+  if (!isTauri()) return s.notify("info", "Export is available in the desktop app.");
+  if (s.clips.length === 0) return s.notify("info", "Add something to the timeline before exporting.");
+  useStore.setState({ exportOpen: true, playing: false });
+}
 import { zoomToFit } from "./components/Timeline";
 import { copyKeyframes, hasCopiedKeyframes, pasteKeyframes } from "./lib/keyframeClipboard";
 import type { KeyframeRef } from "./types";
@@ -113,7 +121,7 @@ export function useShortcuts() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const s = useStore.getState();
-      if (s.dialog || s.newProjectDialog) return; // modals handle their own keys
+      if (s.dialog || s.newProjectDialog || s.exportOpen) return; // modals handle their own keys
       const tag = (e.target as HTMLElement | null)?.tagName;
       const typing = tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA";
       const mod = e.ctrlKey || e.metaKey;
@@ -128,6 +136,7 @@ export function useShortcuts() {
         if (key === "o") return run(() => openProject());
         if (key === "n") return run(newProject);
         if (key === "i") return run(openImportDialog);
+        if (key === "e") return run(openExport);
         // Let text fields keep their own undo.
         if (!typing && key === "z") return run(e.shiftKey ? redo : undo);
         if (!typing && key === "y") return run(redo);

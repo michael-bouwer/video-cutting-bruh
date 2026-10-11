@@ -1,4 +1,5 @@
 mod cache;
+mod export;
 mod ffmpeg;
 mod probe;
 mod project;
@@ -68,6 +69,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .manage(ffmpeg::ProxyJobs::default())
+        .manage(export::ExportJobs::default())
         .setup(|app| {
             // Runs after window-state restored the last size/position.
             if let Some(win) = app.get_webview_window("main") {
@@ -88,13 +90,21 @@ pub fn run() {
             cache::proxy_cache_info,
             cache::clean_proxy_cache,
             cache::adopt_proxies,
-            cache::save_screenshot
+            cache::save_screenshot,
+            export::export_encoders,
+            export::export_audio_segment,
+            export::export_save_audio,
+            export::export_begin,
+            export::export_frame,
+            export::export_end,
+            export::export_cancel
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app, event| {
             if let tauri::RunEvent::Exit = event {
                 ffmpeg::kill_all(app);
+                export::kill_all(app);
             }
         });
 }

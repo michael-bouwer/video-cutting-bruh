@@ -1,6 +1,7 @@
 import { useStore } from "../store";
 import { effectDef } from "../lib/effects";
 import { keyframeColor } from "../lib/keyframes";
+import { easingLabel } from "../lib/easing";
 import { PROPS } from "../lib/props";
 import { clipDuration, snap } from "../lib/timeline";
 import { copyKeyframes, pasteKeyframes, hasCopiedKeyframes } from "../lib/keyframeClipboard";
@@ -216,7 +217,7 @@ function Diamond({ item, refObj, selected, zoom, locked }: { item: LaneItem; ref
       onPointerDown={onDown}
       onDoubleClick={() => useStore.getState().seek(abs)}
       {...tip(
-        `${item.kf.v.toFixed(2)} at ${item.kf.t.toFixed(2)}s into the clip · ${item.kf.ease}\nDrag to move · double-click to jump the playhead here · ${MOD}C copy, ${MOD}V paste at playhead, Delete removes`,
+        `${item.kf.v.toFixed(2)} at ${item.kf.t.toFixed(2)}s into the clip · ${easingLabel(item.kf.ease)}\nDrag to move · double-click to jump the playhead here · ${MOD}C copy, ${MOD}V paste at playhead, Delete removes`,
         { label: "Keyframe" },
       )}
     />

@@ -1,0 +1,206 @@
+import { convertFileSrc, invoke, isTauri } from "@tauri-apps/api/core";
+import { player, audioGain } from "../engine/player";
+import { useStore } from "../store";
+import { buildAudioEffect } from "./effects";
+import { effectValueAt } from "./keyframes";
+import { clipDuration, timelineEnd } from "./timeline";
+
+/**
+ * Export = render every frame with the preview engine and stream the pixels to
+ * ffmpeg (see src-tauri/src/export.rs), plus an audio mix rendered offline with
+ * the same volume/fade/effect logic the preview uses.
+ */
+
+export type Codec = "h264" | "hevc" | "av1";
+export type Quality = "high" | "balanced" | "small";
+
+export interface EncoderInfo {
+  codec: Codec;
+  encoder: string;
+  hardware: boolean;
+}
+
+export interface ExportSettings {
+  path: string;
+  /** Output size as a fraction of the project resolution. */
+  scale: number;
+  fps: number;
+  codec: Codec;
+  quality: Quality;
+  audio: boolean;
+}
+
+export interface ExportProgress {
+  phase: "audio" | "video" | "finishing";
+  frame: number;
+  frames: number;
+  /** Frames rendered per second (video phase). */
+  speed: number;
+  /** Seconds remaining (estimate). */
+  eta: number;
+}
+
+export const even = (n: number) => Math.max(2, Math.round(n / 2) * 2);
+
+export async function listEncoders(): Promise<EncoderInfo[]> {
+  if (!isTauri()) return [];
+  return invoke<EncoderInfo[]>("export_encoders");
+}
+
+// ---- Audio mix --------------------------------------------------------------------
+
+/** 16-bit PCM WAV from a rendered buffer. */
+function encodeWav(buf: AudioBuffer): Uint8Array {
+  const channels = buf.numberOfChannels;
+  const frames = buf.length;
+  const data = new DataView(new ArrayBuffer(44 + frames * channels * 2));
+  const str = (o: number, s: string) => [...s].forEach((c, i) => data.setUint8(o + i, c.charCodeAt(0)));
+  str(0, "RIFF");
+  data.setUint32(4, 36 + frames * channels * 2, true);
+  str(8, "WAVEfmt ");
+  data.setUint32(16, 16, true);
+  data.setUint16(20, 1, true);
+  data.setUint16(22, channels, true);
+  data.setUint32(24, buf.sampleRate, true);
+  data.setUint32(28, buf.sampleRate * channels * 2, true);
+  data.setUint16(32, channels * 2, true);
+  data.setUint16(34, 16, true);
+  str(36, "data");
+  data.setUint32(40, frames * channels * 2, true);
+  const chans = [...Array(channels)].map((_, c) => buf.getChannelData(c));
+  let o = 44;
+  for (let i = 0; i < frames; i++) {
+    for (let c = 0; c < channels; c++) {
+      const v = Math.max(-1, Math.min(1, chans[c][i]));
+      data.setInt16(o, v < 0 ? v * 0x8000 : v * 0x7fff, true);
+      o += 2;
+    }
+  }
+  return new Uint8Array(data.buffer);
+}
+
+/**
+ * Mixes every audible audio clip into one WAV, offline, using the same rules as
+ * the preview (clip volume keyframes × fades × track mute/solo, audio effects).
+ * Audio is taken from the original files, not the preview copies.
+ */
+async function renderAudioMix(total: number, isCancelled: () => boolean): Promise<Uint8Array | null> {
+  const st = useStore.getState();
+  const anySolo = st.tracks.some((t) => t.kind === "audio" && t.solo);
+  const audible = st.clips.filter((c) => {
+    const track = st.tracks.find((t) => t.id === c.trackId);
+    const m = st.media.find((x) => x.id === c.mediaId);
+    return track?.kind === "audio" && !track.muted && (!anySolo || track.solo) && m && m.status !== "missing" && m.status !== "error";
+  });
+  if (audible.length === 0) return null;
+
+  const sampleRate = 48000;
+  const ctx = new OfflineAudioContext(2, Math.max(1, Math.ceil(total * sampleRate)), sampleRate);
+  for (const c of audible) {
+    if (isCancelled()) return null;
+    const m = st.media.find((x) => x.id === c.mediaId)!;
+    const dur = clipDuration(c);
+    let wav: string;
+    try {
+      wav = await invoke<string>("export_audio_segment", { path: m.path, start: c.trimIn, duration: dur });
+    } catch {
+      continue; // no audio stream in that file
+    }
+    const decoded = await ctx.decodeAudioData(await (await fetch(convertFileSrc(wav))).arrayBuffer());
+    const src = ctx.createBufferSource();
+    src.buffer = decoded;
+
+    let tail: AudioNode = src;
+    for (const fx of c.effects.filter((f) => f.enabled)) {
+      const nodes = buildAudioEffect(ctx, fx.type);
+      if (!nodes) continue;
+      const animated = Object.values(fx.keyframes).some((k) => k.length > 0);
+      // Static effects need one update; animated ones are sampled 20× a second.
+      for (let ts = c.start; ts <= c.start + dur + 1e-6; ts += animated ? 0.05 : Infinity) {
+        nodes.update((k) => effectValueAt(fx, k, ts - c.start), ts);
+      }
+      tail.connect(nodes.input);
+      tail = nodes.output;
+    }
+    // Volume keyframes and fades, as a smooth gain envelope (100 points/s).
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(audioGain(c, c.start), c.start);
+    for (let ts = c.start + 0.01; ts < c.start + dur; ts += 0.01) gain.gain.linearRampToValueAtTime(audioGain(c, ts), ts);
+    gain.gain.linearRampToValueAtTime(audioGain(c, c.start + dur), c.start + dur);
+    tail.connect(gain).connect(ctx.destination);
+    src.start(c.start, 0, dur);
+  }
+  if (isCancelled()) return null;
+  return encodeWav(await ctx.startRendering());
+}
+
+// ---- Run ----------------------------------------------------------------------------------
+
+export interface ExportHandle {
+  cancel: () => void;
+  done: Promise<string>;
+}
+
+export function startExport(opts: ExportSettings, encoder: string, onProgress: (p: ExportProgress) => void): ExportHandle {
+  let cancelled = false;
+  let jobId: string | null = null;
+  const isCancelled = () => cancelled;
+
+  const done = (async () => {
+    const st = useStore.getState();
+    const total = timelineEnd(st.clips);
+    if (total <= 0) throw new Error("The timeline is empty");
+    const width = even(st.settings.width * opts.scale);
+    const height = even(st.settings.height * opts.scale);
+    const frames = Math.max(1, Math.ceil(total * opts.fps - 1e-6));
+
+    onProgress({ phase: "audio", frame: 0, frames, speed: 0, eta: 0 });
+    const wav = opts.audio ? await renderAudioMix(total, isCancelled) : null;
+    if (cancelled) throw new Error("cancelled");
+    const audioPath = wav ? await invoke<string>("export_save_audio", wav) : null;
+
+    jobId = await invoke<string>("export_begin", {
+      opts: { path: opts.path, width, height, fps: opts.fps, encoder, codec: opts.codec, quality: opts.quality, audioPath },
+    });
+
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext("2d", { alpha: false, willReadFrequently: true })!;
+
+    player.beginExport();
+    const started = performance.now();
+    let inflight: Promise<unknown> | null = null;
+    try {
+      for (let i = 0; i < frames; i++) {
+        if (cancelled) throw new Error("cancelled");
+        await player.renderFrame(ctx, i / opts.fps, width, height);
+        const pixels = new Uint8Array(ctx.getImageData(0, 0, width, height).data.buffer);
+        // Keep one frame in flight: render the next while ffmpeg receives this one.
+        if (inflight) await inflight;
+        inflight = invoke("export_frame", pixels, { headers: { "x-export-id": jobId } });
+        if (i % 3 === 0) player.showFrame(canvas);
+        const elapsed = (performance.now() - started) / 1000;
+        const speed = (i + 1) / Math.max(elapsed, 1e-3);
+        onProgress({ phase: "video", frame: i + 1, frames, speed, eta: (frames - i - 1) / speed });
+      }
+      if (inflight) await inflight;
+    } finally {
+      player.endExport();
+    }
+    onProgress({ phase: "finishing", frame: frames, frames, speed: 0, eta: 0 });
+    const out = await invoke<string>("export_end", { id: jobId });
+    jobId = null;
+    return out;
+  })().catch(async (e) => {
+    if (jobId) await invoke("export_cancel", { id: jobId }).catch(() => {});
+    throw e instanceof Error ? e : new Error(String(e));
+  });
+
+  return {
+    cancel: () => {
+      cancelled = true;
+    },
+    done,
+  };
+}

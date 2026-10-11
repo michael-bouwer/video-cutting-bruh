@@ -1,13 +1,9 @@
-import type { AnimProp, Clip, Easing, Effect, Keyframe } from "../types";
+import type { AnimProp, Clip, Curve, Easing, Effect, Keyframe } from "../types";
+import { applyEasing, EASING_PRESETS } from "./easing";
 import { PROP_KEYS } from "./props";
 
-export const EASINGS: { key: Easing; label: string }[] = [
-  { key: "linear", label: "Linear" },
-  { key: "easeIn", label: "Ease in" },
-  { key: "easeOut", label: "Ease out" },
-  { key: "easeInOut", label: "Ease in-out" },
-  { key: "hold", label: "Hold" },
-];
+/** Easing choices for keyframes (presets; "custom" is set by editing the curve). */
+export const EASINGS: { key: Easing; label: string }[] = EASING_PRESETS.map((p) => ({ key: p.key, label: p.label }));
 
 /** A random, readable keyframe colour (varied hue, fixed saturation/lightness). */
 export function randomKeyframeColor(): string {
@@ -22,19 +18,9 @@ export function keyframeColor(kf: Keyframe): string {
   return `hsl(${h} 85% 62%)`;
 }
 
-export function ease(kind: Easing, p: number): number {
-  switch (kind) {
-    case "linear":
-      return p;
-    case "easeIn":
-      return p * p * p;
-    case "easeOut":
-      return 1 - Math.pow(1 - p, 3);
-    case "easeInOut":
-      return p < 0.5 ? 4 * p * p * p : 1 - Math.pow(-2 * p + 2, 3) / 2;
-    case "hold":
-      return 0;
-  }
+/** Eased progress (0..1) for an easing preset or custom curve. */
+export function ease(kind: Easing, p: number, curve?: Curve): number {
+  return applyEasing(kind, p, curve);
 }
 
 /** Interpolated value of a keyframe track at clip-local time `t` (`base` if it has no keyframes). */
@@ -47,7 +33,7 @@ export function interpolate(kfs: Keyframe[], base: number, t: number): number {
     const a = kfs[i];
     const b = kfs[i + 1];
     if (t >= a.t && t < b.t) {
-      const p = ease(a.ease, (t - a.t) / (b.t - a.t));
+      const p = ease(a.ease, (t - a.t) / (b.t - a.t), a.curve);
       return a.v + (b.v - a.v) * p;
     }
   }

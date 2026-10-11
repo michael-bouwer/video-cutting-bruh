@@ -25,11 +25,14 @@ A cross-platform (Windows / macOS / Linux) video editor built with Tauri 2 + Rea
   - **Trimming:** dragging an edge trims the clip. Dragging it back restores the trimmed footage, up to the length of the source file; stills can be stretched to any length.
   - **Linked audio:** a video with sound becomes a video clip and an audio clip, linked (⛓). Linked clips move, trim, split and delete together. If the audio's track is busy, the audio moves to another audio track with room. Use **Unlink** in the inspector to edit them separately, or Shift+Delete to remove just one.
   - **Audio clips:** keyframeable volume, fade-in and fade-out (drag the handles at the top corners), plus track mute and solo. Audio files (mp3, wav, m4a, aac, flac, ogg, opus) can be imported too.
-- **Transitions:** crossfade, dip to black, wipe left/right, slide left/up, iris. They apply where two clips touch on a video track (click ⧉ on the cut) and are centred on the cut, using footage beyond each clip's trim points where the file has it.
-- **Keyframes:** position X/Y, scale, rotation and opacity (video) and volume (audio), with linear, ease in/out/in-out and hold easing.
-  - Click ◆ to keyframe a property at the playhead.
-  - Once a property has keyframes, editing its value writes a keyframe.
-  - You can drag the preview to move the selected clip.
+- **Transitions (24):** cut, crossfade, blur dissolve, dip to black/white, wipe left/right/up/down, diagonal, clock wipe, barn doors (sideways and up/down), iris, push left/right/up/down, cover from left/right, reveal left/right, zoom in/out. They apply where two clips touch on a video track (click ⧉ on the cut), are centred on the cut, and each has its own timing curve.
+- **Keyframes:** position X/Y, scale, rotation and opacity (video), volume (audio), and every effect parameter.
+  - Click ◆ to keyframe at the playhead. Once a property is animated, editing its value writes a keyframe.
+  - You can also drag the preview to move the selected clip.
+- **Timing curves (CSS-style):** every keyframe and every transition has an easing button that opens a curve editor, like the cubic-bezier editor in browser devtools.
+  - Presets: linear, ease, ease-in/out/in-out, expo, back (overshoot), hold.
+  - Drag the two control points of the curve, or type the `cubic-bezier(x1, y1, x2, y2)` numbers. Up/down past the box overshoots.
+  - An animated dot previews the timing.
 - **Effects** (✦ Effects button in the inspector's tab bar opens a panel to the left of the inspector). Every parameter is keyframeable (◆, ‹ ›, easing), and effects can be bypassed, reordered and reset.
   - **Video and images:** brightness, contrast, saturation, hue shift, blur, black & white, sepia, invert and vignette. They render through canvas filters.
   - **Audio:** gain (dB, can boost above 100%), pan, low cut, high cut, bass, treble and echo. They run through Web Audio.
@@ -44,6 +47,12 @@ A cross-platform (Windows / macOS / Linux) video editor built with Tauri 2 + Rea
   - Delete removes the selected keyframes, and double-clicking a keyframe jumps the playhead to it.
   - Every keyframe gets a random colour when it's created, the same everywhere it appears (lanes, clip markers, ◆ buttons, the inspector's list). Click its swatch in the list for a new colour.
 - **Alignment toolbar** (above the preview), for the selected clip at the playhead: align left/centre/right and top/middle/bottom, plus Fit, Fill and Reset. It accounts for scale and rotation, and animated properties get a keyframe at the playhead.
+- **Export** (⤓ Export in the toolbar, File → Export video…, or Ctrl/⌘+E): renders the timeline to MP4.
+  - **Options:** output file; resolution (100/75/50/25% of the project); frame rate; format (H.264, HEVC or AV1, using the fastest working encoder: NVENC/AMF/QSV/VideoToolbox on the GPU, else x264/x265/SVT-AV1); quality (High/Balanced/Small); audio on/off.
+  - **Picture:** every frame is rendered by the preview engine at its exact time, so the output matches the preview (transitions, effects, keyframes, curves). The raw frames stream straight into ffmpeg.
+  - **Audio:** taken from the original files and mixed offline with the same volume, fade, mute/solo and audio-effect logic as the preview, then encoded as AAC.
+  - **Progress:** a progress bar with fps, speed and time remaining, and Cancel. Exports are written under a temporary name and only renamed when complete.
+  - **Limits:** output is SDR (BT.709) for now, and it renders from the preview copies, so it waits for any that are still being made.
 - **Number fields:** drag left or right on any number field to change it (Shift: faster, Alt: finer), or click it to type. Arrow keys step the value while typing. Sliders work as before.
 - **Timeline actions:** **✂ Split** cuts at the playhead: the selected clip with its linked clip, or with nothing selected, every clip under the playhead. **📷 Screenshot** saves the current preview frame (with effects, at project resolution) as a PNG and adds it to the media bin. Saved projects keep screenshots in `<project folder>/Screenshots/`.
 - **Editing:** split at the playhead (`S`): the selected clip and its link, or everything under the playhead. Duplicate (Ctrl/⌘+D), delete (Del).
@@ -106,6 +115,8 @@ src/
   lib/screenshot.ts    capture the preview frame as a PNG image asset
   lib/keyframeClipboard.ts  copy/paste of keyframes selected in the timeline lanes
   lib/marquee.ts       box selection of clips and keyframes in the timeline
+  lib/export.ts        export: offline audio mix + frame-by-frame render streamed to ffmpeg
+  lib/easing.ts        cubic-bezier timing curves (presets + custom), shared by keyframes and transitions
   lib/transitions.ts   transition renderers               ← add new transitions here
   lib/mediaDrag.ts     dragging media from the bin onto the timeline (pointer-based)
   lib/media.ts         import pipeline (Tauri paths / browser files), proxies, project media restore, relink
@@ -116,6 +127,7 @@ src/
 src-tauri/src/
   lib.rs               `import_media` command: grants asset-protocol access per file, probes it
   probe.rs             dependency-free MP4/MOV/MKV probe (codec, size, duration, bit depth, colour, HDR)
+  export.rs            export: encoder detection, audio segments, ffmpeg process fed with raw frames
   project.rs           project read/write (atomic), autosave, keep window on screen
   cache.rs             where proxies live (project folder vs temporary), cache info/cleanup, moving on save
   ffmpeg.rs            optional ffmpeg: locate binaries, ffprobe colour fallback, proxy encoding + cancel
@@ -142,6 +154,6 @@ All media URLs go through `convertFileSrc` in `lib/media.ts`. If the asset proto
 
 ## Next steps
 
-- Export: an ffmpeg sidecar that builds a filtergraph from the timeline, including HDR→SDR tone mapping (`zscale` + `tonemap`) or HDR passthrough
+- High-quality export mode: ffmpeg renders from the original files (HDR10 output, no extra re-encode)
 - Multiple tracks, audio waveforms, timeline thumbnails
 - More keyframeable properties (crop, anchor point, blur…) and bezier easing

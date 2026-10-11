@@ -11,12 +11,14 @@ interface Placed {
   end: number;
   duration: number;
 }
-import { EASINGS, keyframeColor, keyframeNear, valueAt } from "../lib/keyframes";
+import { keyframeColor, keyframeNear, valueAt } from "../lib/keyframes";
+import { easingLabel } from "../lib/easing";
 import { TRANSITIONS } from "../lib/transitions";
 import { hdrLabel } from "../lib/media";
-import type { Easing, TransitionType } from "../types";
+import type { TransitionType } from "../types";
 import { kbd } from "./ui";
 import { NumberField } from "./NumberField";
+import { EasingButton } from "./CurveEditor";
 import { ProjectPanel } from "./ProjectPanel";
 import { tip } from "./Tooltip";
 
@@ -117,10 +119,14 @@ function TransitionInspector({ placed }: { placed: Placed }) {
           onChange={(e) => setTransition(placed.clip.id, { type: e.target.value as TransitionType })}
           {...tip("How the previous clip changes into this one. \"Cut\" removes the transition (Delete key does too).")}
         >
-          {TRANSITIONS.map((t) => (
-            <option key={t.key} value={t.key}>
-              {t.label}
-            </option>
+          {[...new Set(TRANSITIONS.map((t) => t.group))].map((g) => (
+            <optgroup key={g} label={g}>
+              {TRANSITIONS.filter((t) => t.group === g).map((t) => (
+                <option key={t.key} value={t.key}>
+                  {t.label}
+                </option>
+              ))}
+            </optgroup>
           ))}
         </select>
       </div>
@@ -138,6 +144,17 @@ function TransitionInspector({ placed }: { placed: Placed }) {
         />
         <span className="value">{duration.toFixed(2)}s</span>
       </div>
+      {type !== "cut" && (
+        <div className="field">
+          <label>Timing</label>
+          <EasingButton
+            ease={placed.clip.transitionIn.ease ?? "easeInOut"}
+            curve={placed.clip.transitionIn.curve}
+            title="Transition timing"
+            onChange={(ease, curve) => setTransition(placed.clip.id, { ease, curve: ease === "custom" ? curve : undefined })}
+          />
+        </div>
+      )}
       {type !== "cut" && transIn < duration - 1e-3 && (
         <p className="muted small">
           {transIn > 0
@@ -363,18 +380,12 @@ function PropRow({ def, placed, local }: { def: PropDef; placed: Placed; local: 
       <div className="prop-body">
         <input type="range" min={def.min} max={def.max} step={def.step} value={value} onChange={(e) => set(Number(e.target.value))} />
         {here && (
-          <select
-            className="ease"
-            value={here.ease}
-            {...tip("How the value moves from this keyframe to the next. Ease in/out start or end slowly; Hold keeps the value, then jumps at the next keyframe.", { title: "Easing" })}
-            onChange={(e) => updateKeyframe(clip.id, def.key, here.id, { ease: e.target.value as Easing })}
-          >
-            {EASINGS.map((x) => (
-              <option key={x.key} value={x.key}>
-                {x.label}
-              </option>
-            ))}
-          </select>
+          <EasingButton
+            ease={here.ease}
+            curve={here.curve}
+            title="Easing to next keyframe"
+            onChange={(ease, curve) => updateKeyframe(clip.id, def.key, here.id, { ease, curve: ease === "custom" ? curve : undefined })}
+          />
         )}
       </div>
     </div>
@@ -413,7 +424,7 @@ function KeyframeList({ placed }: { placed: Placed }) {
               {Math.round(kf.v * 10) / 10}
               {def.unit}
             </span>
-            <span className="muted small kf-ease">{EASINGS.find((e) => e.key === kf.ease)?.label}</span>
+            <span className="muted small kf-ease">{easingLabel(kf.ease)}</span>
             <button className="icon" onClick={() => removeKeyframe(clip.id, def.key, kf.id)} {...tip("Delete this keyframe", { label: "Delete keyframe" })}>
               ×
             </button>

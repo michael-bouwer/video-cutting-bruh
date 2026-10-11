@@ -11,6 +11,7 @@ import { TooltipLayer } from "./components/Tooltip";
 import { NewProjectDialog } from "./components/NewProjectDialog";
 import { MediaDragGhost } from "./components/MediaDragGhost";
 import { EffectsPanel } from "./components/EffectsPanel";
+import { ExportDialog } from "./components/ExportDialog";
 import { useStore } from "./store";
 import { useFileDrop, useShortcuts } from "./hooks";
 import { installHistory } from "./lib/history";
@@ -52,6 +53,7 @@ export default function App() {
       <Notices />
       <MediaDragGhost />
       <NewProjectDialog />
+      <ExportDialog />
       <DialogHost />
       <TooltipLayer />
     </div>

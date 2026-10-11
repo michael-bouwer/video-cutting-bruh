@@ -15,6 +15,7 @@ import type {
   Effect,
   EffectType,
   KeyframeRef,
+  Curve,
 } from "./types";
 import { defaultBase, emptyKeyframes, PROP_KEYS } from "./lib/props";
 import { interpolate, keyframeNear, randomKeyframeColor, sortKeyframes } from "./lib/keyframes";
@@ -97,6 +98,8 @@ interface State {
   rerollKeyframeColor: (ref: KeyframeRef) => void;
   /** Inserts keyframes (replacing any at the same time) and returns their refs. */
   insertKeyframes: (items: { clipId: string; fx: string | null; key: string; t: number; v: number; ease: Easing }[]) => KeyframeRef[];
+  /** Export dialog is open. */
+  exportOpen: boolean;
   /** Effects pop-out panel (left of the inspector) is open. */
   effectsOpen: boolean;
   setEffectsOpen: (open: boolean) => void;
@@ -149,12 +152,12 @@ interface State {
   /** Sets a parameter at clip-local time (keyframe if animated, else the static value). */
   setEffectParam: (clipId: string, fxId: string, key: string, localT: number, v: number) => void;
   toggleEffectKeyframe: (clipId: string, fxId: string, key: string, localT: number) => void;
-  setEffectKeyframeEase: (clipId: string, fxId: string, key: string, kfId: string, ease: Easing) => void;
+  setEffectKeyframeEase: (clipId: string, fxId: string, key: string, kfId: string, ease: Easing, curve?: Curve) => void;
 
   /** Sets a property at clip-local time: writes a keyframe if the prop is animated, else the base value. */
   setPropValue: (clipId: string, prop: AnimProp, localT: number, v: number) => void;
   toggleKeyframe: (clipId: string, prop: AnimProp, localT: number) => void;
-  updateKeyframe: (clipId: string, prop: AnimProp, kfId: string, patch: Partial<Pick<Keyframe, "t" | "v" | "ease">>) => void;
+  updateKeyframe: (clipId: string, prop: AnimProp, kfId: string, patch: Partial<Pick<Keyframe, "t" | "v" | "ease" | "curve">>) => void;
   removeKeyframe: (clipId: string, prop: AnimProp, kfId: string) => void;
   resetTransform: (clipId: string) => void;
 
@@ -354,6 +357,7 @@ export const useStore = create<State>((set, get) => {
     recentVersion: 0,
     newProjectDialog: null,
     rightTab: "inspector",
+    exportOpen: false,
     expandedTracks: {},
     toggleTrackExpanded: (trackId) => set((s) => ({ expandedTracks: { ...s.expandedTracks, [trackId]: !s.expandedTracks[trackId] } })),
     kfSelection: [],
@@ -862,12 +866,12 @@ export const useStore = create<State>((set, get) => {
         ),
       })),
 
-    setEffectKeyframeEase: (clipId, fxId, key, kfId, ease) =>
+    setEffectKeyframeEase: (clipId, fxId, key, kfId, ease, curve) =>
       set((s) => ({
         clips: mapClip(s.clips, clipId, (c) =>
           mapEffect(c, fxId, (fx) => ({
             ...fx,
-            keyframes: { ...fx.keyframes, [key]: (fx.keyframes[key] ?? []).map((k) => (k.id === kfId ? { ...k, ease } : k)) },
+            keyframes: { ...fx.keyframes, [key]: (fx.keyframes[key] ?? []).map((k) => (k.id === kfId ? { ...k, ease, curve: ease === "custom" ? curve : undefined } : k)) },
           })),
         ),
       })),

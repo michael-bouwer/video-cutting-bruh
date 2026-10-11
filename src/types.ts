@@ -75,15 +75,50 @@ export type TransitionType =
   | "wipeRight"
   | "slideLeft"
   | "slideUp"
-  | "iris";
+  | "iris"
+  | "wipeUp"
+  | "wipeDown"
+  | "slideRight"
+  | "slideDown"
+  | "coverLeft"
+  | "coverRight"
+  | "revealLeft"
+  | "revealRight"
+  | "zoomIn"
+  | "zoomOut"
+  | "blurDissolve"
+  | "dipToWhite"
+  | "clockWipe"
+  | "barnDoorH"
+  | "barnDoorV"
+  | "diagonal";
 
 export interface Transition {
   type: TransitionType;
   /** Requested duration in seconds; the effective one is clamped by clip lengths. */
   duration: number;
+  /** Timing curve of the transition's progress (default: ease in-out). */
+  ease?: Easing;
+  curve?: Curve;
 }
 
-export type Easing = "linear" | "easeIn" | "easeOut" | "easeInOut" | "hold";
+/** Preset timing curves (see lib/easing.ts) or "custom" with a `curve`. */
+export type Easing =
+  | "linear"
+  | "ease"
+  | "easeIn"
+  | "easeOut"
+  | "easeInOut"
+  | "easeInExpo"
+  | "easeOutExpo"
+  | "easeInBack"
+  | "easeOutBack"
+  | "easeInOutBack"
+  | "hold"
+  | "custom";
+
+/** Cubic Bézier control points [x1, y1, x2, y2], as in CSS cubic-bezier(). */
+export type Curve = [number, number, number, number];
 
 export interface Keyframe {
   id: string;
@@ -92,6 +127,8 @@ export interface Keyframe {
   v: number;
   /** Easing used from this keyframe to the next one. */
   ease: Easing;
+  /** Control points when `ease` is "custom". */
+  curve?: Curve;
   /** Display colour, randomly assigned on creation so keyframes are easy to tell apart. */
   color?: string;
   /**

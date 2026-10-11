@@ -3,7 +3,7 @@ import type { AnimProp, Clip, MediaItem, Track } from "../types";
 import { effectValueAt, transformAt, valueAt } from "../lib/keyframes";
 import { buildAudioEffect, canvasFiltersSupported, cssFilter, drawOverlays, type AudioEffectNodes } from "../lib/effects";
 import { activeRange, clipDuration, timelineEnd, trackFrameAt } from "../lib/timeline";
-import { renderTransition } from "../lib/transitions";
+import { easedProgress, renderTransition } from "../lib/transitions";
 
 /** Seconds before a clip's start at which its media is pre-seeked during playback. */
 const PREROLL = 0.4;
@@ -56,8 +56,13 @@ class Player {
     });
     document.body.appendChild(this.host);
 
-    // Browsers only start audio after a user gesture.
-    const unlock = () => this.audioCtx?.state === "suspended" && this.audioCtx.resume().catch(() => {});
+    // Browsers only let audio start from a user gesture, so the Web Audio engine is
+    // created (or resumed) inside one. Creating it any other time (e.g. from a frame
+    // update after recovering a project) leaves it suspended, i.e. silent.
+    const unlock = () => {
+      if (!this.audioCtx) this.audioGraph();
+      else if (this.audioCtx.state === "suspended") this.audioCtx.resume().catch(() => {});
+    };
     window.addEventListener("pointerdown", unlock, true);
     window.addEventListener("keydown", unlock, true);
   }
@@ -75,12 +80,21 @@ class Player {
     }
   }
 
-  /** Connects (or rebuilds) an audio clip's effect chain. */
+  /**
+   * Connects (or rebuilds) an audio clip's effect chain.
+   *
+   * Clips only enter Web Audio when they have audio effects and the engine is
+   * running: once an element is routed into Web Audio its sound only comes out
+   * through the engine, so routing into a suspended engine would mute it.
+   * Everything else plays straight from the element.
+   */
   private chainFor(clip: Clip, el: HTMLMediaElement): AudioChain | null {
-    const graph = this.audioGraph();
-    if (!graph) return null;
-    const { ctx, master } = graph;
     let chain = this.chains.get(clip.id);
+    const wantsEffects = clip.effects.some((fx) => fx.enabled);
+    if (!chain && !wantsEffects) return null;
+    if (!chain && this.audioCtx?.state !== "running") return null;
+    const ctx = this.audioCtx!;
+    const master = this.master!;
     if (!chain) {
       let source: MediaElementAudioSourceNode;
       try {
@@ -204,10 +218,81 @@ class Player {
     return img;
   }
 
+  /** While exporting, the live preview loop stands still (export drives rendering). */
+  private exporting = false;
+
+  beginExport() {
+    this.exporting = true;
+    useStore.setState({ playing: false });
+    for (const el of this.elements.values()) el.pause();
+  }
+
+  endExport() {
+    this.exporting = false;
+  }
+
+  /** Shows an exported frame in the preview while exporting. */
+  showFrame(source: HTMLCanvasElement) {
+    const ctx = this.ctx;
+    if (!ctx) return;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.drawImage(source, 0, 0, ctx.canvas.width, ctx.canvas.height);
+  }
+
+  /**
+   * Renders the frame at exact timeline time `t` into `ctx` (w×h), waiting until
+   * every visible video has seeked to the right frame and every still is decoded.
+   */
+  async renderFrame(ctx: CanvasRenderingContext2D, t: number, w: number, h: number) {
+    const state = useStore.getState();
+    const media = new Map(state.media.map((m) => [m.id, m]));
+    const visible: Clip[] = [];
+    for (const track of state.tracks) {
+      if (track.kind !== "video" || track.hidden) continue;
+      const frame = trackFrameAt(state.clips, track.id, t);
+      if (frame.current) visible.push(frame.current);
+      if (frame.outgoing) visible.push(frame.outgoing);
+    }
+    await Promise.all(visible.map((c) => this.prepareExact(c, media.get(c.mediaId), t)));
+    this.compose(ctx, state.clips, state.tracks, t, w, h, media);
+  }
+
+  private async prepareExact(c: Clip, m: MediaItem | undefined, t: number) {
+    if (!m || m.status !== "ready") return;
+    if (m.kind === "image") {
+      const img = this.imageFor(m);
+      if (!img.complete || !img.naturalWidth) await img.decode().catch(() => {});
+      return;
+    }
+    const el = this.elementFor(c, m, false) as HTMLVideoElement;
+    if (!el.paused) el.pause();
+    const maxT = Math.max(0, (m.duration || c.trimOut) - 0.001);
+    // A hair past the exact time so float rounding never lands on the previous frame.
+    const src = Math.min(maxT, Math.max(0, c.trimIn + (t - c.start)) + 1e-4);
+    const once = (ev: string, ms: number) =>
+      new Promise<void>((resolve) => {
+        const done = () => {
+          el.removeEventListener(ev, done);
+          clearTimeout(timer);
+          resolve();
+        };
+        const timer = setTimeout(done, ms);
+        el.addEventListener(ev, done);
+      });
+    if (el.readyState < 1) await once("loadedmetadata", 5000);
+    if (Math.abs(el.currentTime - src) > 1e-3 || el.readyState < 2) {
+      const seeked = once("seeked", 5000);
+      el.currentTime = src;
+      await seeked;
+    }
+    if (el.readyState < 2) await once("canplay", 5000);
+  }
+
   private tick = (now: number) => {
     this.raf = requestAnimationFrame(this.tick);
     const dt = Math.min(0.1, (now - this.last) / 1000);
     this.last = now;
+    if (this.exporting) return;
 
     const state = useStore.getState();
     const total = timelineEnd(state.clips);
@@ -292,6 +377,13 @@ class Player {
       // Resizing a canvas resets its context state.
       ctx.imageSmoothingQuality = "high";
     }
+    this.compose(ctx, clips, tracks, t, w, h, media);
+  }
+
+  /** Composites all visible video tracks at time `t` (shared by the preview and export). */
+  private compose(ctx: CanvasRenderingContext2D, clips: Clip[], tracks: Track[], t: number, w: number, h: number, media: Map<string, MediaItem>) {
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = "high";
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.globalAlpha = 1;
     ctx.fillStyle = "#000";
@@ -317,7 +409,8 @@ class Player {
       const frame = trackFrameAt(clips, track.id, t);
       if (!frame.current) continue;
       if (frame.outgoing) {
-        renderTransition(frame.current.transitionIn.type, ctx, drawer(frame.outgoing), drawer(frame.current), frame.progress, w, h);
+        const tr = frame.current.transitionIn;
+        renderTransition(tr.type, ctx, drawer(frame.outgoing), drawer(frame.current), easedProgress(tr, frame.progress), w, h);
       } else {
         drawer(frame.current)(ctx, 1);
       }
@@ -360,9 +453,13 @@ function drawSource(
   ctx.translate(w / 2 + (tr.x / 100) * w, h / 2 + (tr.y / 100) * h);
   ctx.rotate((tr.rotation * Math.PI) / 180);
   ctx.scale(s, s);
-  if (canvasFiltersSupported) ctx.filter = cssFilter(clip, local, h);
+  if (canvasFiltersSupported) {
+    // Combine with a filter set by a transition (e.g. blur dissolve).
+    const outer = ctx.filter && ctx.filter !== "none" ? ctx.filter : "";
+    const own = cssFilter(clip, local, h);
+    ctx.filter = [outer, own === "none" ? "" : own].filter(Boolean).join(" ") || "none";
+  }
   ctx.drawImage(src, -dw / 2, -dh / 2, dw, dh);
-  if (canvasFiltersSupported) ctx.filter = "none";
   drawOverlays(ctx, clip, local, -dw / 2, -dh / 2, dw, dh);
   ctx.restore();
 }

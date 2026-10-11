@@ -206,6 +206,7 @@ export function Timeline() {
               <TimecodeReadout />
             </div>
             <div className="ruler" style={{ width: laneWidth }} onPointerDown={scrub} {...tip("Click or drag to move the playhead")}>
+              <PlayheadKnob zoom={zoom} onScrub={scrub} />
               {ticks.map((t) => (
                 <div key={t} className="tick" style={{ left: t * zoom }}>
                   <span>{t >= 60 ? `${Math.floor(t / 60)}:${String(Math.round(t % 60)).padStart(2, "0")}` : `${t}s`}</span>
@@ -225,7 +226,7 @@ export function Timeline() {
 
           {snapLine !== null && <div className="snap-line" style={{ left: HEADER_W + snapLine * zoom }} />}
           {marquee && <div className="marquee" style={marquee} />}
-          <Playhead zoom={zoom} scrollRef={scrollRef} onScrub={scrub} />
+          <Playhead zoom={zoom} scrollRef={scrollRef} />
         </div>
       </div>
     </section>
@@ -246,7 +247,7 @@ function TimecodeReadout() {
 }
 
 /** Separate component so only the playhead re-renders 60×/s during playback. */
-function Playhead({ zoom, scrollRef, onScrub }: { zoom: number; scrollRef: React.RefObject<HTMLDivElement | null>; onScrub: (e: React.PointerEvent) => void }) {
+function Playhead({ zoom, scrollRef }: { zoom: number; scrollRef: React.RefObject<HTMLDivElement | null> }) {
   const currentTime = useStore((s) => s.currentTime);
   const playing = useStore((s) => s.playing);
   // Keep the playhead in view during playback.
@@ -257,11 +258,14 @@ function Playhead({ zoom, scrollRef, onScrub }: { zoom: number; scrollRef: React
     const view = el.clientWidth - HEADER_W;
     if (x < el.scrollLeft || x > el.scrollLeft + view - 40) el.scrollLeft = Math.max(0, x - 40);
   }, [currentTime, zoom, playing, scrollRef]);
-  return (
-    <div className="playhead" style={{ left: HEADER_W + currentTime * zoom }}>
-      <div className="playhead-knob" onPointerDown={onScrub} {...tip("Drag to scrub")} />
-    </div>
-  );
+  // The line sits under the sticky track headers; its knob is drawn in the ruler (see PlayheadKnob).
+  return <div className="playhead" style={{ left: HEADER_W + currentTime * zoom }} />;
+}
+
+/** Playhead handle inside the ruler, so the ruler and track headers can stack above the line. */
+function PlayheadKnob({ zoom, onScrub }: { zoom: number; onScrub: (e: React.PointerEvent) => void }) {
+  const currentTime = useStore((s) => s.currentTime);
+  return <div className="playhead-knob" style={{ left: currentTime * zoom }} onPointerDown={onScrub} {...tip("Drag to scrub")} />;
 }
 
 /**

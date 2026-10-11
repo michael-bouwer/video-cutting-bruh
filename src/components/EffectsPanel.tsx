@@ -1,11 +1,12 @@
 import { useState } from "react";
 import { useStore } from "../store";
 import { canvasFiltersSupported, effectDef, effectsFor, type EffectParam } from "../lib/effects";
-import { effectValueAt, EASINGS, keyframeColor, keyframeNear } from "../lib/keyframes";
+import { effectValueAt, keyframeColor, keyframeNear } from "../lib/keyframes";
 import { clipDuration, formatTime } from "../lib/timeline";
 import { NumberField } from "./NumberField";
+import { EasingButton } from "./CurveEditor";
 import { tip } from "./Tooltip";
-import type { Clip, Easing, Effect, TrackKind } from "../types";
+import type { Clip, Effect, TrackKind } from "../types";
 
 /**
  * Pop-out panel (left of the inspector): the selected clip's effect stack with
@@ -185,18 +186,12 @@ function ParamRow({ clip, fx, param }: { clip: Clip; fx: Effect; param: EffectPa
       <div className="prop-body">
         <input type="range" min={param.min} max={param.max} step={param.step} value={value} onChange={(e) => set(Number(e.target.value))} aria-label={`${param.label} slider`} />
         {here && (
-          <select
-            className="ease"
-            value={here.ease}
-            onChange={(e) => st().setEffectKeyframeEase(clip.id, fx.id, param.key, here.id, e.target.value as Easing)}
-            {...tip("How the value moves from this keyframe to the next", { title: "Easing" })}
-          >
-            {EASINGS.map((x) => (
-              <option key={x.key} value={x.key}>
-                {x.label}
-              </option>
-            ))}
-          </select>
+          <EasingButton
+            ease={here.ease}
+            curve={here.curve}
+            title="Easing to next keyframe"
+            onChange={(ease, curve) => st().setEffectKeyframeEase(clip.id, fx.id, param.key, here.id, ease, curve)}
+          />
         )}
       </div>
     </div>

@@ -1,6 +1,7 @@
 import { useStore } from "../store";
 import { formatTime, timelineEnd } from "../lib/timeline";
 import { openImportDialog } from "../lib/media";
+import { openExport } from "../hooks";
 import { shortResolution } from "./ProjectPanel";
 import { clearRecent, getRecent, newProject, openProject, saveProject } from "../lib/project";
 import { redo, undo } from "../lib/history";
@@ -70,6 +71,13 @@ export function Toolbar() {
       </div>
 
       <div className="toolbar-group right">
+        <button
+          className="primary export-btn"
+          onClick={openExport}
+          {...tip("Render the timeline to an MP4 file (H.264 / HEVC / AV1)", { title: "Export", kbd: kbd("Mod+E"), label: "Export video" })}
+        >
+          ⤓<span className="collapse-label"> Export</span>
+        </button>
         <ThemeMenu />
         <label
           className={`toggle ${settings.allowHdr ? "on" : ""}`}
@@ -114,6 +122,7 @@ function FileMenu() {
             <MenuItem label="Save as…" shortcut={kbd("Mod+Shift+S")} onClick={run(() => saveProject(true))} />
             <div className="menu-sep" />
             <MenuItem label="Import media…" shortcut={kbd("Mod+I")} onClick={run(openImportDialog)} />
+            <MenuItem label="Export video…" shortcut={kbd("Mod+E")} onClick={run(openExport)} />
             <div className="menu-sep" />
             <div className="menu-heading">Recent projects</div>
             {recent.length === 0 ? (

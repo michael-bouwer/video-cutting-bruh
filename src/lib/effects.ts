@@ -265,13 +265,36 @@ export const canvasFiltersSupported = (() => {
 export interface AudioEffectNodes {
   input: AudioNode;
   output: AudioNode;
-  /** Applies parameter values (called every frame). */
-  update: (v: (key: string) => number) => void;
+  /**
+   * Applies parameter values: live (every frame, `at` omitted = now) or scheduled
+   * at context time `at` (offline rendering for export).
+   */
+  update: (v: (key: string) => number, at?: number) => void;
 }
 
-const smooth = (param: AudioParam, value: number, ac: BaseAudioContext) => param.setTargetAtTime(value, ac.currentTime, 0.015);
+let scheduleAt: number | undefined;
+const smooth = (param: AudioParam, value: number, ac: BaseAudioContext) =>
+  param.setTargetAtTime(value, scheduleAt ?? ac.currentTime, 0.015);
 
-export function buildAudioEffect(ac: AudioContext, type: EffectType): AudioEffectNodes | null {
+/** Wraps an effect so `update(v, at)` schedules at `at` instead of "now". */
+const scheduled = (nodes: AudioEffectNodes): AudioEffectNodes => ({
+  ...nodes,
+  update: (v, at) => {
+    scheduleAt = at;
+    try {
+      nodes.update(v);
+    } finally {
+      scheduleAt = undefined;
+    }
+  },
+});
+
+export function buildAudioEffect(ac: BaseAudioContext, type: EffectType): AudioEffectNodes | null {
+  const nodes = buildAudioEffectNodes(ac, type);
+  return nodes && scheduled(nodes);
+}
+
+function buildAudioEffectNodes(ac: BaseAudioContext, type: EffectType): AudioEffectNodes | null {
   switch (type) {
     case "gain": {
       const g = ac.createGain();
