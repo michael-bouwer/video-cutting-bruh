@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useStore } from "../store";
 import { even, listEncoders, startExport, type Codec, type EncoderInfo, type ExportHandle, type ExportProgress, type Quality } from "../lib/export";
+import { planFor, startHqExport } from "../lib/exportHq";
 import { projectName } from "../lib/dialog";
 import { formatTime, timelineEnd } from "../lib/timeline";
 import { tip } from "./Tooltip";
@@ -16,6 +17,18 @@ const ENCODER_LABEL = (e: EncoderInfo) =>
     ? `${e.encoder.split("_").pop()!.toUpperCase().replace("VIDEOTOOLBOX", "VideoToolbox")} (GPU)`
     : `${e.encoder} (CPU)`;
 const LAST_DIR_KEY = "vcb.exportDir";
+const MODE_KEY = "vcb.exportMode";
+
+/** preview: render frames with the preview engine (matches it exactly). original: ffmpeg renders from the source files. */
+type Mode = "preview" | "original";
+
+const readMode = (): Mode => {
+  try {
+    return localStorage.getItem(MODE_KEY) === "original" ? "original" : "preview";
+  } catch {
+    return "preview";
+  }
+};
 
 type Phase = "setup" | "running" | "done" | "error";
 
@@ -50,6 +63,7 @@ function ExportDialogBody() {
   const settings = useStore((s) => s.settings);
   const clips = useStore((s) => s.clips);
   const media = useStore((s) => s.media);
+  const tracks = useStore((s) => s.tracks);
   const close = () => useStore.setState({ exportOpen: false });
 
   const [phase, setPhase] = useState<Phase>("setup");
@@ -60,6 +74,8 @@ function ExportDialogBody() {
   const [codec, setCodec] = useState<Codec>("h264");
   const [quality, setQuality] = useState<Quality>("high");
   const [audio, setAudio] = useState(true);
+  const [mode, setModeState] = useState<Mode>(readMode);
+  const [hdr, setHdr] = useState(true);
   const [progress, setProgress] = useState<ExportProgress | null>(null);
   const [result, setResult] = useState("");
   const [error, setError] = useState("");
@@ -97,7 +113,39 @@ function ExportDialogBody() {
   const preparing = media.filter((m) => used.has(m.id) && m.status === "proxying");
   const broken = media.filter((m) => used.has(m.id) && (m.status === "missing" || m.status === "error"));
   const encoder = encoders?.find((e) => e.codec === codec);
-  const canExport = total > 0 && !!encoder && !!path && preparing.length === 0;
+  const visibleVideo = new Set(tracks.filter((t) => t.kind === "video" && !t.hidden).map((t) => t.id));
+  const hdrSources = media.some((m) => m.probe?.hdr && clips.some((c) => c.mediaId === m.id && visibleVideo.has(c.trackId)));
+  const hdrOut = mode === "original" && hdrSources && hdr && codec !== "h264";
+  // Only the preview engine needs the preview copies.
+  const canExport = total > 0 && !!encoder && !!path && (mode === "original" || preparing.length === 0);
+
+  const setMode = (m: Mode) => {
+    setModeState(m);
+    try {
+      localStorage.setItem(MODE_KEY, m);
+    } catch {
+      /* optional */
+    }
+  };
+
+  // HDR10 needs a 10-bit codec: switch off H.264 when it's turned on.
+  useEffect(() => {
+    if (mode === "original" && hdrSources && hdr && codec === "h264" && encoders) {
+      const alt = encoders.find((e) => e.codec === "hevc") ?? encoders.find((e) => e.codec === "av1");
+      if (alt) setCodec(alt.codec);
+    }
+  }, [mode, hdrSources, hdr, codec, encoders]);
+
+  // What the original-files render can't reproduce exactly.
+  const warnings = useMemo(() => {
+    if (mode !== "original" || phase !== "setup") return [];
+    try {
+      return planFor({ path, scale, fps, codec, quality, audio }, hdrOut).warnings;
+    } catch (e) {
+      return [String(e)];
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, phase, clips, tracks, media, scale, fps, audio, hdrOut]);
 
   const browse = async () => {
     const { save } = await import("@tauri-apps/plugin-dialog");
@@ -116,7 +164,8 @@ function ExportDialogBody() {
     }
     setPhase("running");
     setError("");
-    const h = startExport({ path, scale, fps, codec, quality, audio }, encoder.encoder, setProgress);
+    const opts = { path, scale, fps, codec, quality, audio };
+    const h = mode === "original" ? startHqExport(opts, encoder.encoder, hdrOut, setProgress) : startExport(opts, encoder.encoder, setProgress);
     handle.current = h;
     try {
       setResult(await h.done);
@@ -155,6 +204,29 @@ function ExportDialogBody() {
                 <input type="text" value={path} onChange={(e) => setPath(e.target.value)} spellCheck={false} />
                 <button type="button" onClick={browse}>
                   Browse…
+                </button>
+              </div>
+            </div>
+            <div className="form-row">
+              <span>Render</span>
+              <div className="segmented mode-seg" role="radiogroup">
+                <button
+                  role="radio"
+                  aria-checked={mode === "preview"}
+                  className={mode === "preview" ? "active" : ""}
+                  onClick={() => setMode("preview")}
+                  {...tip("Renders every frame with the preview engine, so it looks exactly like the preview. SDR only; HDR footage comes from the tone-mapped preview copies.")}
+                >
+                  Match preview
+                </button>
+                <button
+                  role="radio"
+                  aria-checked={mode === "original"}
+                  className={mode === "original" ? "active" : ""}
+                  onClick={() => setMode("original")}
+                  {...tip("ffmpeg renders the edit straight from your original recordings: best quality, can keep HDR, usually faster. A few things are approximated (listed below).")}
+                >
+                  Original files (HQ)
                 </button>
               </div>
             </div>
@@ -206,6 +278,15 @@ function ExportDialogBody() {
                 ))}
               </div>
             </div>
+            {mode === "original" && hdrSources && (
+              <label className="form-row">
+                <span>HDR</span>
+                <span className="checkbox-row" {...tip("Keep your HDR recordings in HDR (HDR10: PQ, BT.2020, 10-bit). SDR clips and images are mapped into HDR. Needs HEVC or AV1, and an HDR screen/player to look right.")}>
+                  <input type="checkbox" checked={hdr} onChange={(e) => setHdr(e.target.checked)} />
+                  HDR10 output (otherwise tone mapped to SDR)
+                </span>
+              </label>
+            )}
             <label className="form-row">
               <span>Audio</span>
               <span className="checkbox-row">
@@ -214,9 +295,16 @@ function ExportDialogBody() {
               </span>
             </label>
             <p className="muted small export-summary">
-              {formatTime(total, fps)} · {frames.toLocaleString()} frames · {width}×{height} · SDR (BT.709)
+              {formatTime(total, fps)} · {frames.toLocaleString()} frames · {width}×{height} · {hdrOut ? "HDR10 (PQ, BT.2020)" : "SDR (BT.709)"}
             </p>
-            {preparing.length > 0 && <p className="export-warn">Waiting for {preparing.length} preview cop{preparing.length === 1 ? "y" : "ies"} to finish before exporting.</p>}
+            {mode === "original" && warnings.length > 0 && (
+              <ul className="export-notes">
+                {warnings.map((w) => (
+                  <li key={w}>{w}</li>
+                ))}
+              </ul>
+            )}
+            {mode === "preview" && preparing.length > 0 && <p className="export-warn">Waiting for {preparing.length} preview cop{preparing.length === 1 ? "y" : "ies"} to finish before exporting.</p>}
             {broken.length > 0 && <p className="export-warn">{broken.length} file(s) are missing or unplayable — their clips will be black/silent.</p>}
             {encoders?.length === 0 && <p className="export-warn">ffmpeg with a usable encoder wasn't found. {error}</p>}
             <div className="modal-actions">
@@ -231,7 +319,13 @@ function ExportDialogBody() {
         {phase === "running" && (
           <>
             <p className="export-phase">
-              {progress?.phase === "audio" ? "Mixing audio…" : progress?.phase === "finishing" ? "Finishing the file…" : "Rendering frames…"}
+              {progress?.phase === "audio"
+                ? "Mixing audio…"
+                : progress?.phase === "finishing"
+                  ? "Finishing the file…"
+                  : mode === "original"
+                    ? "Rendering from the original files…"
+                    : "Rendering frames…"}
             </p>
             <div className="export-bar" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(pct)}>
               <div style={{ width: `${pct}%` }} />
@@ -242,7 +336,11 @@ function ExportDialogBody() {
                 {(progress.speed / fps).toFixed(2)}× real time · about {fmtDuration(progress.eta)} left
               </p>
             )}
-            <p className="muted small">The preview shows the frames as they're rendered. Editing is paused until the export finishes.</p>
+            <p className="muted small">
+              {mode === "original"
+                ? "ffmpeg is rendering the edit straight from your original files."
+                : "The preview shows the frames as they're rendered. Editing is paused until the export finishes."}
+            </p>
             <div className="modal-actions">
               <button className="danger" onClick={() => handle.current?.cancel()}>
                 Cancel export

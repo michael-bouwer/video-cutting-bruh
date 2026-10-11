@@ -70,6 +70,7 @@ pub fn run() {
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .manage(ffmpeg::ProxyJobs::default())
         .manage(export::ExportJobs::default())
+        .manage(export::HqJobs::default())
         .setup(|app| {
             // Runs after window-state restored the last size/position.
             if let Some(win) = app.get_webview_window("main") {
@@ -97,7 +98,10 @@ pub fn run() {
             export::export_begin,
             export::export_frame,
             export::export_end,
-            export::export_cancel
+            export::export_cancel,
+            export::export_hq_begin,
+            export::export_hq_status,
+            export::export_hq_cancel
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

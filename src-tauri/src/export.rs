@@ -307,12 +307,242 @@ pub fn export_cancel(jobs: State<'_, ExportJobs>, id: String) {
     }
 }
 
+// ---- High-quality export: ffmpeg renders the edit from the original files ------------------
+//
+// The frontend (src/lib/exportHq.ts) translates the timeline into ffmpeg inputs, one
+// filter_complex script and a few sendcmd files; we write those to a job folder, run
+// ffmpeg there, and report progress (parsed from `-progress pipe:1`) when polled.
+
+/// Encoder arguments for 10-bit HDR10 output (HEVC/AV1 only).
+fn hdr_encoder_args(encoder: &str) -> Vec<String> {
+    let mut a: Vec<&str> = match encoder {
+        "libx265" => vec![
+            "-pix_fmt",
+            "yuv420p10le",
+            "-x265-params",
+            "hdr-opt=1:repeat-headers=1:colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc",
+        ],
+        "libsvtav1" | "libaom-av1" => vec!["-pix_fmt", "yuv420p10le"],
+        e if e.starts_with("hevc_") => vec!["-pix_fmt", "p010le", "-profile:v", "main10"],
+        _ => vec!["-pix_fmt", "p010le"],
+    };
+    a.extend(["-color_primaries", "bt2020", "-color_trc", "smpte2084", "-colorspace", "bt2020nc"]);
+    a.into_iter().map(String::from).collect()
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HqFile {
+    name: String,
+    content: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HqOptions {
+    path: String,
+    /// Arguments for each input, each ending with `-i <file>`.
+    inputs: Vec<Vec<String>>,
+    /// filter_complex script producing `[vout]` (and `[aout]` when `audio`).
+    graph: String,
+    /// Extra files the script references by name (sendcmd command lists).
+    files: Vec<HqFile>,
+    audio: bool,
+    duration: f64,
+    encoder: String,
+    codec: String,
+    quality: String,
+    hdr: bool,
+    /// Initialise a Vulkan device for libplacebo tone mapping.
+    vulkan: bool,
+}
+
+#[derive(Serialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct HqStatus {
+    /// "running" | "done" | "error"
+    state: String,
+    /// Seconds of output written so far.
+    time: f64,
+    /// Encoding speed relative to real time.
+    speed: f64,
+    output: Option<String>,
+    error: Option<String>,
+}
+
+struct HqJob {
+    child: Arc<Mutex<Child>>,
+    status: Arc<Mutex<HqStatus>>,
+    cancelled: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[derive(Default)]
+pub struct HqJobs(Mutex<HashMap<String, HqJob>>);
+
+/// Applies one `key=value` line of ffmpeg's `-progress` output.
+fn apply_progress(st: &mut HqStatus, line: &str) {
+    let Some((k, v)) = line.trim().split_once('=') else { return };
+    match k {
+        // Microseconds despite the name (both keys are printed; prefer `_us`).
+        "out_time_us" | "out_time_ms" => {
+            if let Ok(us) = v.parse::<f64>() {
+                st.time = (us / 1e6).max(0.0);
+            }
+        }
+        "speed" => {
+            if let Ok(s) = v.trim_end_matches('x').trim().parse::<f64>() {
+                st.speed = s;
+            }
+        }
+        _ => {}
+    }
+}
+
+#[tauri::command]
+pub fn export_hq_begin(app: AppHandle, jobs: State<'_, HqJobs>, opts: HqOptions) -> Result<String, String> {
+    let bin = locate("ffmpeg").ok_or("ffmpeg not found")?;
+    let out = PathBuf::from(&opts.path);
+    let ext = out.extension().and_then(|e| e.to_str()).unwrap_or("mp4").to_string();
+    let partial = out.with_extension(format!("partial.{ext}"));
+    if opts.hdr && opts.codec == "h264" {
+        return Err("HDR output needs HEVC or AV1".into());
+    }
+
+    let id = format!("{:x}", crate::cache::stable_hash(&format!("hq|{}|{:?}", opts.path, std::time::SystemTime::now())));
+    let dir = export_temp_dir(&app)?.join(format!("hq-{id}"));
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join("graph.txt"), &opts.graph).map_err(|e| e.to_string())?;
+    for f in &opts.files {
+        // Plain file names only: everything stays inside the job folder.
+        if f.name.is_empty() || f.name.contains(['/', '\\', ':']) || f.name.starts_with('.') {
+            return Err(format!("Invalid file name: {}", f.name));
+        }
+        std::fs::write(dir.join(&f.name), &f.content).map_err(|e| e.to_string())?;
+    }
+
+    let mut cmd = command(&bin);
+    // Relative names in the script (graph.txt, *.cmd) resolve against the job folder.
+    cmd.current_dir(&dir)
+        .args(["-hide_banner", "-nostdin", "-y", "-loglevel", "error", "-nostats", "-progress", "pipe:1"]);
+    if opts.vulkan {
+        cmd.args(["-init_hw_device", "vulkan=vk", "-filter_hw_device", "vk"]);
+    }
+    for input in &opts.inputs {
+        cmd.args(input);
+    }
+    cmd.args(["-/filter_complex", "graph.txt", "-map", "[vout]"]);
+    if opts.audio {
+        cmd.args(["-map", "[aout]", "-c:a", "aac", "-b:a", "256k"]);
+    }
+    cmd.args(["-t", &format!("{:.6}", opts.duration)])
+        .args(encoder_args(&opts.encoder, &opts.codec, &opts.quality));
+    if opts.hdr {
+        cmd.args(hdr_encoder_args(&opts.encoder));
+    } else {
+        cmd.args(["-pix_fmt", "yuv420p", "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709"]);
+    }
+    cmd.args(["-movflags", "+faststart"])
+        .arg(&partial)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = cmd.spawn().map_err(|e| format!("Could not start ffmpeg: {e}"))?;
+    let stdout = child.stdout.take().unwrap();
+    let mut err = child.stderr.take().unwrap();
+    let stderr = Arc::new(Mutex::new(String::new()));
+    let sink = stderr.clone();
+    let err_thread = std::thread::spawn(move || {
+        let mut s = String::new();
+        let _ = err.read_to_string(&mut s);
+        *sink.lock().unwrap() = s;
+    });
+
+    let status = Arc::new(Mutex::new(HqStatus { state: "running".into(), ..Default::default() }));
+    let child = Arc::new(Mutex::new(child));
+    let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let (status, child, cancelled) = (status.clone(), child.clone(), cancelled.clone());
+        std::thread::spawn(move || {
+            use std::io::BufRead;
+            for line in std::io::BufReader::new(stdout).lines().map_while(Result::ok) {
+                apply_progress(&mut status.lock().unwrap(), &line);
+            }
+            // Poll rather than block in wait() so a cancel can still take the lock and kill.
+            let exit = loop {
+                if let Ok(Some(s)) = child.lock().unwrap().try_wait() {
+                    break s;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            };
+            let _ = err_thread.join();
+            let mut st = status.lock().unwrap();
+            if cancelled.load(std::sync::atomic::Ordering::SeqCst) {
+                let _ = std::fs::remove_file(&partial);
+                st.state = "error".into();
+                st.error = Some("cancelled".into());
+            } else if !exit.success() {
+                let _ = std::fs::remove_file(&partial);
+                let err = stderr.lock().unwrap().clone();
+                let tail: Vec<&str> = err.lines().filter(|l| !l.trim().is_empty()).rev().take(4).collect();
+                st.state = "error".into();
+                st.error = Some(format!("ffmpeg failed: {}", tail.into_iter().rev().collect::<Vec<_>>().join(" | ")));
+            } else {
+                let moved = (|| {
+                    if out.exists() {
+                        std::fs::remove_file(&out).map_err(|e| format!("Couldn't replace the existing file: {e}"))?;
+                    }
+                    std::fs::rename(&partial, &out).map_err(|e| e.to_string())
+                })();
+                match moved {
+                    Ok(()) => {
+                        st.state = "done".into();
+                        st.output = Some(out.to_string_lossy().into_owned());
+                    }
+                    Err(e) => {
+                        st.state = "error".into();
+                        st.error = Some(e);
+                    }
+                }
+            }
+            let _ = std::fs::remove_dir_all(&dir);
+        });
+    }
+    jobs.0.lock().unwrap().insert(id.clone(), HqJob { child, status, cancelled });
+    Ok(id)
+}
+
+/// Progress of a high-quality export; finished jobs are forgotten once reported.
+#[tauri::command]
+pub fn export_hq_status(jobs: State<'_, HqJobs>, id: String) -> Result<HqStatus, String> {
+    let mut map = jobs.0.lock().unwrap();
+    let st = map.get(&id).ok_or("export not running")?.status.lock().unwrap().clone();
+    if st.state != "running" {
+        map.remove(&id);
+    }
+    Ok(st)
+}
+
+#[tauri::command]
+pub fn export_hq_cancel(jobs: State<'_, HqJobs>, id: String) {
+    if let Some(job) = jobs.0.lock().unwrap().get(&id) {
+        job.cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
+        let _ = job.child.lock().unwrap().kill();
+    }
+}
+
 /// Kill running exports when the app exits.
 pub fn kill_all(app: &AppHandle) {
     if let Some(jobs) = app.try_state::<ExportJobs>() {
         for (_, mut job) in jobs.0.lock().unwrap().drain() {
             let _ = job.child.kill();
             let _ = std::fs::remove_file(&job.partial);
+        }
+    }
+    if let Some(jobs) = app.try_state::<HqJobs>() {
+        for (_, job) in jobs.0.lock().unwrap().drain() {
+            job.cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
+            let _ = job.child.lock().unwrap().kill();
         }
     }
 }
@@ -328,5 +558,17 @@ mod tests {
         assert!(a.windows(2).any(|w| w[0] == "-tag:v" && w[1] == "hvc1"));
         let x = encoder_args("libx264", "h264", "small");
         assert!(x.windows(2).any(|w| w[0] == "-crf" && w[1] == "27"));
+    }
+
+    #[test]
+    fn progress_lines_and_hdr_args() {
+        let mut st = HqStatus::default();
+        apply_progress(&mut st, "out_time_us=2500000");
+        apply_progress(&mut st, "speed=1.75x");
+        apply_progress(&mut st, "speed=N/A");
+        assert!((st.time - 2.5).abs() < 1e-9 && (st.speed - 1.75).abs() < 1e-9);
+        let a = hdr_encoder_args("hevc_nvenc");
+        assert!(a.windows(2).any(|w| w[0] == "-profile:v" && w[1] == "main10"));
+        assert!(a.windows(2).any(|w| w[0] == "-color_trc" && w[1] == "smpte2084"));
     }
 }

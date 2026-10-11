@@ -48,11 +48,14 @@ A cross-platform (Windows / macOS / Linux) video editor built with Tauri 2 + Rea
   - Every keyframe gets a random colour when it's created, the same everywhere it appears (lanes, clip markers, ◆ buttons, the inspector's list). Click its swatch in the list for a new colour.
 - **Alignment toolbar** (above the preview), for the selected clip at the playhead: align left/centre/right and top/middle/bottom, plus Fit, Fill and Reset. It accounts for scale and rotation, and animated properties get a keyframe at the playhead.
 - **Export** (⤓ Export in the toolbar, File → Export video…, or Ctrl/⌘+E): renders the timeline to MP4.
+  - **Render mode:** **Match preview** renders every frame with the preview engine, so the output looks exactly like the preview. **Original files (HQ)** has ffmpeg render the edit straight from the source recordings: footage is only encoded once, it can output **HDR10** (HEVC/AV1, PQ, BT.2020, 10-bit; SDR clips and images are mapped into HDR), and it doesn't need the preview copies. The choice is remembered.
   - **Options:** output file; resolution (100/75/50/25% of the project); frame rate; format (H.264, HEVC or AV1, using the fastest working encoder: NVENC/AMF/QSV/VideoToolbox on the GPU, else x264/x265/SVT-AV1); quality (High/Balanced/Small); audio on/off.
-  - **Picture:** every frame is rendered by the preview engine at its exact time, so the output matches the preview (transitions, effects, keyframes, curves). The raw frames stream straight into ffmpeg.
+  - **Match preview picture:** every frame is rendered by the preview engine at its exact time, so the output matches the preview (transitions, effects, keyframes, curves). The raw frames stream straight into ffmpeg.
   - **Audio:** taken from the original files and mixed offline with the same volume, fade, mute/solo and audio-effect logic as the preview, then encoded as AAC.
   - **Progress:** a progress bar with fps, speed and time remaining, and Cancel. Exports are written under a temporary name and only renamed when complete.
-  - **Limits:** output is SDR (BT.709) for now, and it renders from the preview copies, so it waits for any that are still being made.
+  - **Match preview limits:** output is SDR (BT.709), and it renders from the preview copies, so it waits for any that are still being made.
+  - **Original files (HQ):** `lib/exportHq.ts` turns the timeline into one ffmpeg filter graph. Each clip is decoded, converted to the output's colour space (HDR tone mapped with libplacebo BT.2390 like the previews, or zscale on the CPU), fitted, filtered and warped (position/scale/rotation as per-frame `perspective` expressions). Touching clips are joined with `concat`/`xfade`, and tracks are overlaid bottom-up. Animated effect parameters and opacity are driven by `sendcmd` files. Colour effects use the same CSS filter matrices as the preview. Audio is trimmed, gain-enveloped (volume keyframes × fades), processed (volume, stereotools, highpass/lowpass, bass/treble, aecho) and mixed with `amix`.
+  - **HQ approximations** (listed in the dialog when they apply): transitions use ffmpeg's built-in `xfade` versions with linear timing ("Zoom out" becomes a crossfade, "Blur dissolve" uses `hblur`); animated vignette and echo use their first values; colour effects in HDR output act on HDR values.
 - **Number fields:** drag left or right on any number field to change it (Shift: faster, Alt: finer), or click it to type. Arrow keys step the value while typing. Sliders work as before.
 - **Timeline actions:** **✂ Split** cuts at the playhead: the selected clip with its linked clip, or with nothing selected, every clip under the playhead. **📷 Screenshot** saves the current preview frame (with effects, at project resolution) as a PNG and adds it to the media bin. Saved projects keep screenshots in `<project folder>/Screenshots/`.
 - **Editing:** split at the playhead (`S`): the selected clip and its link, or everything under the playhead. Duplicate (Ctrl/⌘+D), delete (Del).
@@ -116,6 +119,7 @@ src/
   lib/keyframeClipboard.ts  copy/paste of keyframes selected in the timeline lanes
   lib/marquee.ts       box selection of clips and keyframes in the timeline
   lib/export.ts        export: offline audio mix + frame-by-frame render streamed to ffmpeg
+  lib/exportHq.ts      HQ export: timeline → ffmpeg inputs, filter_complex script, sendcmd files
   lib/easing.ts        cubic-bezier timing curves (presets + custom), shared by keyframes and transitions
   lib/transitions.ts   transition renderers               ← add new transitions here
   lib/mediaDrag.ts     dragging media from the bin onto the timeline (pointer-based)
@@ -127,7 +131,7 @@ src/
 src-tauri/src/
   lib.rs               `import_media` command: grants asset-protocol access per file, probes it
   probe.rs             dependency-free MP4/MOV/MKV probe (codec, size, duration, bit depth, colour, HDR)
-  export.rs            export: encoder detection, audio segments, ffmpeg process fed with raw frames
+  export.rs            export: encoder detection, audio segments, ffmpeg fed with raw frames; HQ jobs (script + progress)
   project.rs           project read/write (atomic), autosave, keep window on screen
   cache.rs             where proxies live (project folder vs temporary), cache info/cleanup, moving on save
   ffmpeg.rs            optional ffmpeg: locate binaries, ffprobe colour fallback, proxy encoding + cancel
@@ -154,6 +158,5 @@ All media URLs go through `convertFileSrc` in `lib/media.ts`. If the asset proto
 
 ## Next steps
 
-- High-quality export mode: ffmpeg renders from the original files (HDR10 output, no extra re-encode)
 - Multiple tracks, audio waveforms, timeline thumbnails
 - More keyframeable properties (crop, anchor point, blur…) and bezier easing

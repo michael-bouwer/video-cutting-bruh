@@ -882,7 +882,11 @@ body.dragging-clip .gap-btn, body.marquee-selecting .gap-btn { display: none; }
 .export-modal { width: min(520px, 100%); }
 .export-modal .form-row select, .export-modal .form-row .path-picker { width: 100%; min-width: 0; }
 .checkbox-row { display: flex; align-items: center; gap: 8px; }
-.quality-seg { justify-self: start; }
+.quality-seg,
+.mode-seg { justify-self: start; }
+.mode-seg button { padding: 3px 12px; }
+.export-notes { margin: 0 0 8px 90px; padding-left: 16px; font-size: 12px; color: var(--muted); }
+.export-notes li { margin: 2px 0; }
 .quality-seg button { padding: 3px 12px; }
 .export-summary { margin: 4px 0 10px 90px !important; }
 .export-warn { color: var(--accent-2); margin: 6px 0 !important; }
