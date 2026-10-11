@@ -6,10 +6,12 @@
 //! Proxies use the fastest pipeline that works on this machine: Vulkan decode +
 //! libplacebo + a hardware H.264 encoder, falling back step by step to CPU-only.
 //!
-//! ffmpeg isn't bundled; we look for a user install in the usual places for
-//! each OS. GUI apps on macOS don't inherit the shell PATH, and on Windows a
-//! fresh `winget install` only updates PATH for new processes, so well-known
-//! install locations are searched explicitly.
+//! Release builds ship ffmpeg/ffprobe as Tauri sidecars next to the app's
+//! executable (see scripts/prepare-ffmpeg.mjs), which is searched first (after
+//! the `VCB_FFMPEG_DIR` override). Otherwise we fall back to a user install in
+//! the usual places for each OS: GUI apps on macOS don't inherit the shell PATH,
+//! and on Windows a fresh `winget install` only updates PATH for new processes,
+//! so well-known install locations are searched explicitly.
 
 use crate::probe::{ColorInfo, MediaProbe};
 use serde::Serialize;

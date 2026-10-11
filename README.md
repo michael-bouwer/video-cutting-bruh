@@ -104,6 +104,23 @@ pnpm tauri dev
 
 Rust probe tests: `cd src-tauri && cargo test`
 
+### Bundled ffmpeg
+
+The app ships its own ffmpeg and ffprobe as Tauri sidecars, so users don't need to install anything. `scripts/prepare-ffmpeg.mjs` puts them in `src-tauri/binaries/` (gitignored). It runs automatically before `tauri dev` and `tauri build`, and it skips the work when the files are already there.
+- **Windows/Linux:** a pinned BtbN FFmpeg 9.0 GPL build is downloaded. Windows uses the shared build: two small exes plus DLLs, installed next to the app by `tauri.windows.conf.json`.
+- **macOS, or a custom build:** set `VCB_FFMPEG_SRC` to a folder containing ffmpeg and ffprobe.
+- **Commands:** `pnpm ffmpeg` prepares the files manually; `pnpm ffmpeg --force` downloads them again. Run it once after a fresh clone before `cargo test`/`cargo check`, because the Tauri build script requires the sidecars to exist.
+- **Lookup order at runtime:** `VCB_FFMPEG_DIR`, then the app's own folder (the bundled copy), then system installs.
+- **Licence:** the bundled build is GPL, so pass on its licence and source link (https://github.com/BtbN/FFmpeg-Builds) if you distribute the app.
+
+### Installers
+
+```bash
+pnpm tauri build
+```
+
+The output goes to `src-tauri/target/release/bundle/`: `nsis/*-setup.exe` (about 55 MB, the one to share) and `msi/*.msi`. Bump `version` in `src-tauri/tauri.conf.json` for each release. The installers aren't code-signed, so Windows SmartScreen asks users to click "More info → Run anyway".
+
 ## Architecture
 
 ```
