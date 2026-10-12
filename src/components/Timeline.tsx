@@ -20,6 +20,14 @@ import { tip } from "./Tooltip";
 import { createScreenshot } from "../lib/screenshot";
 import { onMarquee, startMarquee, type MarqueeBox } from "../lib/marquee";
 import type { Clip, Track } from "../types";
+import { ClipVisual, useLaneViewport } from "./ClipVisual";
+import { addMarkerAtPlayhead, MarkerLines, RulerMarkers } from "./Markers";
+import { openContextMenu } from "./ContextMenu";
+import { MenuItem } from "./ui";
+import { snapExtras } from "../lib/snapExtras";
+import { CLIP_COLORS, clipName, colorHue } from "../lib/clipLabels";
+import { copyAttributes, pasteAttributes, useAttributes } from "../lib/attributes";
+import { hasSpeedChange, timeMap } from "../lib/speed";
 
 const TICK_STEPS = [0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600];
 const isMac = /Mac|iPhone|iPad/.test(navigator.platform);
@@ -100,6 +108,20 @@ export function Timeline() {
     onMarquee(setMarquee);
     return () => onMarquee(null);
   }, []);
+  // Clip canvases only draw what's on screen, so they need the scroll position.
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const update = () => useLaneViewport.setState({ scrollLeft: el.scrollLeft, width: el.clientWidth - HEADER_W });
+    update();
+    el.addEventListener("scroll", update, { passive: true });
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => {
+      el.removeEventListener("scroll", update);
+      ro.disconnect();
+    };
+  }, []);
 
   const total = timelineEnd(clips);
   const visibleSeconds = (scrollRef.current?.clientWidth ?? 1200) / zoom;
@@ -156,6 +178,18 @@ export function Timeline() {
             ✂ Split
           </button>
           <button
+            onClick={() => useStore.getState().addTitle()}
+            {...tip("Add a text clip at the playhead, on the highest video track with room. Edit the text, font and colours in the inspector.", { title: "Add text", kbd: `${MOD}T`, label: "Add text" })}
+          >
+            T Text
+          </button>
+          <button
+            onClick={addMarkerAtPlayhead}
+            {...tip("Drop a marker at the playhead (works while playing). Clips snap to markers; [ and ] jump between them.", { title: "Add marker", kbd: "M", label: "Add marker" })}
+          >
+            ⚑ Marker
+          </button>
+          <button
             onClick={createScreenshot}
             {...tip("Save the current preview frame (with effects, at project resolution) as a PNG and add it to the media bin as an image.", { title: "Create screenshot", label: "Create screenshot" })}
           >
@@ -206,6 +240,7 @@ export function Timeline() {
               <TimecodeReadout />
             </div>
             <div className="ruler" style={{ width: laneWidth }} onPointerDown={scrub} {...tip("Click or drag to move the playhead")}>
+              <RulerMarkers zoom={zoom} timeAt={timeAtClientX} />
               <PlayheadKnob zoom={zoom} onScrub={scrub} />
               {ticks.map((t) => (
                 <div key={t} className="tick" style={{ left: t * zoom }}>
@@ -224,6 +259,7 @@ export function Timeline() {
             <div className="timeline-empty muted">Drop videos, images or audio here — or drag them from the media bin</div>
           )}
 
+          <MarkerLines zoom={zoom} offset={HEADER_W} />
           {snapLine !== null && <div className="snap-line" style={{ left: HEADER_W + snapLine * zoom }} />}
           {marquee && <div className="marquee" style={marquee} />}
           <Playhead zoom={zoom} scrollRef={scrollRef} />
@@ -406,6 +442,33 @@ function TrackHeader({ track, count }: { track: Track; count: number }) {
             >
               S
             </button>
+            <button
+              className={`track-btn ${track.music ? "on music" : ""}`}
+              aria-pressed={!!track.music}
+              onClick={() => update(track.id, { music: !track.music })}
+              onContextMenu={(e) =>
+                openContextMenu(e, (close) => (
+                  <>
+                    <div className="menu-heading">Turn music down by</div>
+                    {[-6, -12, -18, -24].map((db) => (
+                      <MenuItem
+                        key={db}
+                        label={`${(track.duckDb ?? -12) === db ? "✓ " : ""}${db} dB${db === -12 ? " (default)" : ""}`}
+                        onClick={() => (close(), update(track.id, { duckDb: db, music: true }))}
+                      />
+                    ))}
+                  </>
+                ))
+              }
+              {...tip(
+                track.music
+                  ? `Music track: turned down by ${-(track.duckDb ?? -12)} dB while other audio plays (ducking), and its beats are snap points (ticks on the clips). Right-click to change the amount; click to turn off.`
+                  : "Mark as a music track: it's turned down automatically while other audio (game sound, voice) is loud, and beats become snap points.",
+                { title: track.music ? "Music track" : "Music track: off", label: "Music track" },
+              )}
+            >
+              ♪
+            </button>
           </>
         )}
         <button
@@ -449,10 +512,16 @@ function ClipBlock({ clip, track, zoom, onSnapLine }: { clip: Clip; track: Track
     return s.clips.find((c) => c.id === s.selection!.clipId)?.linkId === clip.linkId;
   });
 
+  const music = useStore((s) => !!s.tracks.find((t) => t.id === clip.trackId)?.music);
+  const [renaming, setRenaming] = useState(false);
+
   const dur = clipDuration(clip);
   const left = clip.start * zoom;
   const width = Math.max(4, dur * zoom);
-  const hue = HUES[Math.max(0, mediaIndex) % HUES.length];
+  const labelHue = colorHue(clip.color);
+  const hue = labelHue ?? (clip.title ? 45 : HUES[Math.max(0, mediaIndex) % HUES.length]);
+  const name = clipName(clip, media);
+  const speedTag = hasSpeedChange(clip) ? (timeMap(clip).constant ? `${Math.round(timeMap(clip).speedAt(0) * 100)}%` : "ramp") : "";
   // Every keyframe on the clip (transform + effects), in its own colour.
   const kfDots = [
     ...Object.values(clip.keyframes).flat(),
@@ -462,7 +531,7 @@ function ClipBlock({ clip, track, zoom, onSnapLine }: { clip: Clip; track: Track
 
   const pointsFor = () => {
     const s = useStore.getState();
-    return snapPoints(s.clips, new Set(groupOf(s.clips, clip).map((c) => c.id)), s.currentTime);
+    return snapPoints(s.clips, new Set(groupOf(s.clips, clip).map((c) => c.id)), s.currentTime, snapExtras());
   };
 
   const onBodyDown = (e: React.PointerEvent) => {
@@ -488,7 +557,7 @@ function ClipBlock({ clip, track, zoom, onSnapLine }: { clip: Clip; track: Track
       const groupPoints = snapPoints(st0.clips, new Set(ids.flatMap((id) => {
         const c = st0.clips.find((x) => x.id === id);
         return c ? groupOf(st0.clips, c).map((x) => x.id) : [];
-      })), st0.currentTime);
+      })), st0.currentTime, snapExtras());
       dragPointer(
         e,
         (dx, ev) => {
@@ -569,17 +638,33 @@ function ClipBlock({ clip, track, zoom, onSnapLine }: { clip: Clip; track: Track
   };
 
   const isAudio = track.kind === "audio";
+  const missing = !clip.title && (!media || media.status === "missing");
+  const onMenu = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    const st = useStore.getState();
+    // Right-clicking outside the selection selects just this clip.
+    if (!st.clipSelection.includes(clip.id)) st.select({ kind: "clip", clipId: clip.id });
+    const ids = useStore.getState().clipSelection.length ? useStore.getState().clipSelection : [clip.id];
+    openContextMenu(e, (close) => clipMenu(clip, ids, isAudio, close, () => setRenaming(true)));
+  };
   return (
     <div
       data-clip-id={clip.id}
-      className={`clip ${track.kind} ${selected ? "selected" : ""} ${linkedSelected ? "linked-selected" : ""} ${!media || media.status === "missing" ? "missing" : ""} ${editable ? "" : "locked"}`}
+      className={`clip ${track.kind} ${clip.title ? "title-clip" : ""} ${labelHue !== undefined ? "labelled" : ""} ${selected ? "selected" : ""} ${linkedSelected ? "linked-selected" : ""} ${missing ? "missing" : ""} ${editable ? "" : "locked"}`}
       style={{ left, width, ["--clip-hue" as string]: hue }}
       onPointerDown={onBodyDown}
+      onContextMenu={onMenu}
+      onDoubleClick={(e) => {
+        if ((e.target as HTMLElement).closest(".clip-label")) setRenaming(true);
+      }}
       {...tip(
-        `${dur.toFixed(2)}s at ${clip.start.toFixed(2)}s · drag to move (also onto other ${track.kind} tracks) · drag the edges to trim — dragging back restores the cut part · ${MOD}D duplicate · Del removes${clip.linkId ? ` · linked: moves and trims together with its ${isAudio ? "video" : "audio"}` : ""}`,
-        { title: media?.name ?? "Missing media" },
+        `${dur.toFixed(2)}s at ${clip.start.toFixed(2)}s · drag to move (also onto other ${track.kind} tracks) · drag the edges to trim — dragging back restores the cut part · double-click the name to rename · right-click for colour, speed and attributes · ${MOD}D duplicate · Del removes${clip.linkId ? ` · linked: moves and trims together with its ${isAudio ? "video" : "audio"}` : ""}`,
+        { title: name },
       )}
     >
+      {!missing && (
+        <ClipVisual clip={clip} media={media} zoom={zoom} width={width} height={ROW_H[track.kind] - 8} kind={track.kind} beats={music} />
+      )}
       {editable && gapLeft > 0 && (
         <button
           className="gap-btn left"
@@ -602,15 +687,22 @@ function ClipBlock({ clip, track, zoom, onSnapLine }: { clip: Clip; track: Track
       )}
       {editable && <div className="trim-handle in" onPointerDown={onTrim("in")} {...tip("Drag to trim the start. Drag back out to restore what was cut.")} />}
       <div className="clip-label">
-        <span>
-          {clip.linkId && <span className="link-icon" aria-label="Linked">⛓ </span>}
-          {media?.name ?? "missing media"}
-        </span>
-        {width > 70 && <span className="muted small">{dur.toFixed(2)}s</span>}
+        {renaming ? (
+          <ClipNameInput clip={clip} placeholder={media?.name ?? "Name"} onDone={() => setRenaming(false)} />
+        ) : (
+          <span>
+            {clip.linkId && <span className="link-icon" aria-label="Linked">⛓ </span>}
+            {name}
+          </span>
+        )}
+        {width > 70 && (
+          <span className="muted small">
+            {dur.toFixed(2)}s{speedTag && <span className="speed-tag"> · ⏱ {speedTag}</span>}
+          </span>
+        )}
       </div>
       {isAudio ? (
         <>
-          <div className="audio-wave" aria-hidden />
           {clip.fadeIn > 0 && <div className="fade-shape in" style={{ width: clip.fadeIn * zoom }} />}
           {clip.fadeOut > 0 && <div className="fade-shape out" style={{ width: clip.fadeOut * zoom }} />}
           {editable && width > 30 && (
@@ -666,5 +758,86 @@ function TransitionMarker({ clip, zoom }: { clip: Clip; zoom: number }) {
     >
       <span>{transitionLabel(type)}</span>
     </div>
+  );
+}
+
+function ClipNameInput({ clip, placeholder, onDone }: { clip: Clip; placeholder: string; onDone: () => void }) {
+  const ref = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    ref.current?.focus();
+    ref.current?.select();
+  }, []);
+  const commit = () => {
+    useStore.getState().setClipMeta([clip.id], { label: ref.current?.value.trim() ?? "" });
+    onDone();
+  };
+  return (
+    <input
+      ref={ref}
+      className="clip-name-input"
+      defaultValue={clip.label ?? ""}
+      placeholder={placeholder}
+      onPointerDown={(e) => e.stopPropagation()}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        e.stopPropagation();
+        if (e.key === "Enter") commit();
+        if (e.key === "Escape") onDone();
+      }}
+    />
+  );
+}
+
+const SPEED_PRESETS = [25, 50, 100, 200, 400];
+
+/** Right-click menu for clips (`ids`: the clips it acts on — the selection, or just this one). */
+function clipMenu(clip: Clip, ids: string[], isAudio: boolean, close: () => void, rename: () => void) {
+  const st = useStore.getState();
+  const run = (fn: () => unknown) => () => {
+    close();
+    fn();
+  };
+  const isStill = !!clip.title || st.media.find((m) => m.id === clip.mediaId)?.kind === "image";
+  const many = ids.length > 1;
+  // Highlighted preset (none while the clip has a speed ramp).
+  const constantSpeed = clip.keyframes.speed?.length ? null : Math.round(clip.base.speed ?? 100);
+  return (
+    <>
+      <div className="menu-heading">{many ? `${ids.length} clips` : clipName(clip, st.media.find((m) => m.id === clip.mediaId))}</div>
+      {!many && <MenuItem label="Rename…" onClick={run(rename)} />}
+      <div className="swatch-row" {...tip("Colour label")}>
+        {CLIP_COLORS.map((c) => (
+          <button
+            key={c.key}
+            className={`swatch ${clip.color === c.key ? "on" : ""}`}
+            style={{ background: `hsl(${c.hue} 60% 50%)` }}
+            aria-label={c.label}
+            onClick={run(() => st.setClipMeta(ids, { color: c.key }))}
+          />
+        ))}
+        <button className="swatch none" aria-label="No colour" onClick={run(() => st.setClipMeta(ids, { color: "" }))}>
+          ×
+        </button>
+      </div>
+      {!isStill && (
+        <>
+          <div className="menu-heading">Speed</div>
+          <div className="speed-row">
+            {SPEED_PRESETS.map((p) => (
+              <button key={p} className={constantSpeed === p ? "on" : ""} onClick={run(() => st.setSpeed(ids, p))}>
+                {p}%
+              </button>
+            ))}
+          </div>
+        </>
+      )}
+      <div className="menu-sep" />
+      <MenuItem label="Copy attributes" shortcut={`${MOD}${ALT}+C`} onClick={run(() => copyAttributes(clip.id))} />
+      <MenuItem label="Paste attributes…" shortcut={`${MOD}${ALT}+V`} disabled={!useAttributes.getState().copied} onClick={run(() => pasteAttributes(ids))} />
+      <div className="menu-sep" />
+      {!many && <MenuItem label="Duplicate" shortcut={`${MOD}D`} onClick={run(() => st.duplicateClip(clip.id))} />}
+      {clip.linkId && !many && <MenuItem label={`Unlink ${isAudio ? "from video" : "from audio"}`} onClick={run(() => st.unlinkClip(clip.id))} />}
+      <MenuItem label={many ? "Delete clips" : "Delete"} shortcut="Del" onClick={run(() => st.removeClips(ids))} />
+    </>
   );
 }

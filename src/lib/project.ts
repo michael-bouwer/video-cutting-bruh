@@ -1,6 +1,6 @@
 import { convertFileSrc, invoke, isTauri } from "@tauri-apps/api/core";
 import { defaultTracks, uid, useStore } from "../store";
-import type { Clip, ProjectSettings, Track } from "../types";
+import type { Clip, Marker, ProjectSettings, Track } from "../types";
 import { cancelProxy, kindOf, refreshFfmpegStatus, restoreMedia, type SavedMedia } from "./media";
 import { defaultBase, emptyKeyframes } from "./props";
 import { clipDuration } from "./timeline";
@@ -9,8 +9,11 @@ import { ask, confirmUnsaved, projectName } from "./dialog";
 import { requestNewProject } from "../components/NewProjectDialog";
 
 const FORMAT = "video-cutting-bruh";
-/** 2: multi-track timeline (tracks, clip start/trackId/linkId, audio fades). */
-const VERSION = 2;
+/**
+ * 2: multi-track timeline (tracks, clip start/trackId/linkId, audio fades).
+ * 3: markers, text clips, clip labels, speed and crop properties, music tracks.
+ */
+const VERSION = 3;
 export const PROJECT_EXT = "vcbproj";
 const AUTOSAVE_INTERVAL_MS = 15_000;
 const RECENT_KEY = "vcb.recentProjects";
@@ -23,6 +26,7 @@ interface ProjectFile {
   media: SavedMedia[];
   tracks: Track[];
   clips: Clip[];
+  markers?: Marker[];
   view: { zoom: number; currentTime: number };
   /** Only in autosaves: which file the work belongs to. */
   projectPath?: string | null;
@@ -42,6 +46,7 @@ function serialize(includePath = false): string {
     media: s.media.map((m) => ({ id: m.id, path: m.path, name: m.name })),
     tracks: s.tracks,
     clips: s.clips,
+    markers: s.markers,
     view: { zoom: s.zoom, currentTime: s.currentTime },
     ...(includePath ? { projectPath: s.projectPath } : {}),
   };
@@ -113,6 +118,7 @@ async function applyProject(data: ProjectFile | null, path: string | null, dirty
       useStore.setState({
         media: [],
         clips: [],
+        markers: data?.markers ?? [],
         tracks: data?.tracks?.length ? data.tracks : defaultTracks(),
         selection: null,
         playing: false,
@@ -358,6 +364,7 @@ export function installProjectLifecycle(): () => void {
       if (loading || s.dirty) return;
       if (
         s.clips !== prev.clips ||
+        s.markers !== prev.markers ||
         s.tracks !== prev.tracks ||
         s.settings !== prev.settings ||
         (s.media !== prev.media && mediaKey(s) !== mediaKey(prev))
@@ -404,12 +411,26 @@ export function installProjectLifecycle(): () => void {
   import("@tauri-apps/api/window").then(async ({ getCurrentWindow }) => {
     const win = getCurrentWindow();
     const un = await win.onCloseRequested(async (event) => {
-      if (!useStore.getState().dirty) {
+      const { queueBusy } = await import("./exportQueue");
+      const busy = queueBusy();
+      if (!useStore.getState().dirty && !busy) {
         clearAutosave();
         return;
       }
       event.preventDefault();
-      if (!(await settleUnsaved("closing"))) return;
+      if (busy) {
+        const quit = await ask(
+          "Exports are still running",
+          "Closing the app stops the exports in the queue (finished files are kept).",
+          [
+            { id: "stay", label: "Keep running" },
+            { id: "quit", label: "Stop and close", kind: "danger" },
+          ],
+          "stay",
+        );
+        if (quit !== "quit") return;
+      }
+      if (useStore.getState().dirty && !(await settleUnsaved("closing"))) return;
       clearAutosave();
       cancelRunningProxies();
       await win.destroy();

@@ -1,7 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useStore } from "../store";
-import { even, listEncoders, startExport, type Codec, type EncoderInfo, type ExportHandle, type ExportProgress, type Quality } from "../lib/export";
+import { listEncoders, outputSize, startExport, type Codec, type EncoderInfo, type ExportHandle, type ExportProgress, type ExportSettings, type Quality } from "../lib/export";
 import { planFor, startHqExport } from "../lib/exportHq";
+import { enqueueExport } from "../lib/exportQueue";
+import { clipEnd } from "../lib/timeline";
+import { NumberField } from "./NumberField";
 import { projectName } from "../lib/dialog";
 import { formatTime, timelineEnd } from "../lib/timeline";
 import { tip } from "./Tooltip";
@@ -31,6 +34,20 @@ const readMode = (): Mode => {
 };
 
 type Phase = "setup" | "running" | "done" | "error";
+
+type Preset = "custom" | "youtube" | "youtube-hdr" | "discord" | "discord50" | "shorts";
+const PRESETS: { key: Preset; label: string; hint: string }[] = [
+  { key: "custom", label: "Custom", hint: "Your own settings" },
+  { key: "youtube", label: "YouTube — best quality", hint: "Full resolution, H.264, high quality" },
+  { key: "youtube-hdr", label: "YouTube HDR", hint: "HDR10 (HEVC) from your original HDR recordings" },
+  { key: "discord", label: "Discord — under 10 MB", hint: "Bitrate, resolution and frame rate chosen to fit Discord's free upload limit" },
+  { key: "discord50", label: "Discord Nitro — under 50 MB", hint: "Fits Nitro's 50 MB upload limit" },
+  { key: "shorts", label: "Shorts / TikTok / Reels (9:16)", hint: "Vertical: the centre of the frame, full height" },
+];
+/** Audio bitrate for size-limited exports (kbit/s). */
+const SIZE_AUDIO_KBPS = 96;
+
+type RangeMode = "all" | "selection" | "markers" | "custom";
 
 const fmtDuration = (s: number) => {
   if (!Number.isFinite(s) || s <= 0) return "—";
@@ -76,6 +93,20 @@ function ExportDialogBody() {
   const [audio, setAudio] = useState(true);
   const [mode, setModeState] = useState<Mode>(readMode);
   const [hdr, setHdr] = useState(true);
+  const [preset, setPreset] = useState<Preset>("custom");
+  /** Target file size (MB) — picks the bitrate. */
+  const [sizeLimit, setSizeLimit] = useState<number | null>(null);
+  const [vertical, setVertical] = useState(false);
+  const markers = useStore((s) => s.markers);
+  const selectionSpan = useStore((s) => {
+    const ids = s.clipSelection.length ? s.clipSelection : s.selection?.kind === "clip" ? [s.selection.clipId] : [];
+    const sel = s.clips.filter((c) => ids.includes(c.id));
+    return sel.length ? `${Math.min(...sel.map((c) => c.start))}|${Math.max(...sel.map(clipEnd))}` : "";
+  });
+  const [rangeMode, setRangeMode] = useState<RangeMode>(selectionSpan && useStore.getState().clipSelection.length > 0 ? "selection" : "all");
+  const [customRange, setCustomRange] = useState<[number, number]>(() => [0, timelineEnd(useStore.getState().clips)]);
+  const [markerRange, setMarkerRange] = useState<[number, number]>([0, 1]);
+  const [queued, setQueued] = useState(false);
   const [progress, setProgress] = useState<ExportProgress | null>(null);
   const [result, setResult] = useState("");
   const [error, setError] = useState("");
@@ -105,9 +136,24 @@ function ExportDialogBody() {
     return () => window.removeEventListener("keydown", key, true);
   }, [phase]);
 
-  const total = timelineEnd(clips);
-  const width = even(settings.width * scale);
-  const height = even(settings.height * scale);
+  const timelineTotal = timelineEnd(clips);
+  const range = useMemo((): { start: number; end: number } => {
+    if (rangeMode === "selection" && selectionSpan) {
+      const [a, b] = selectionSpan.split("|").map(Number);
+      return { start: a, end: b };
+    }
+    if (rangeMode === "markers" && markers.length >= 2) {
+      const a = markers[Math.min(markerRange[0], markers.length - 1)]?.t ?? 0;
+      const b = markers[Math.min(markerRange[1], markers.length - 1)]?.t ?? timelineTotal;
+      return { start: Math.min(a, b), end: Math.max(a, b) };
+    }
+    if (rangeMode === "custom") return { start: Math.max(0, customRange[0]), end: Math.min(timelineTotal, customRange[1]) };
+    return { start: 0, end: timelineTotal };
+  }, [rangeMode, selectionSpan, markers, markerRange, customRange, timelineTotal]);
+  const total = Math.max(0, range.end - range.start);
+  // Size-limited presets: average bitrate that fits the limit (a little headroom for the container).
+  const bitrateKbps = sizeLimit && total > 0 ? Math.max(100, Math.floor((sizeLimit * 8 * 1024 * 1024 * 0.94) / total / 1000) - SIZE_AUDIO_KBPS) : null;
+  const { width, height } = outputSize(settings.width, settings.height, { scale, vertical });
   const frames = Math.ceil(total * fps);
   const used = new Set(clips.map((c) => c.mediaId));
   const preparing = media.filter((m) => used.has(m.id) && m.status === "proxying");
@@ -118,6 +164,49 @@ function ExportDialogBody() {
   const hdrOut = mode === "original" && hdrSources && hdr && codec !== "h264";
   // Only the preview engine needs the preview copies.
   const canExport = total > 0 && !!encoder && !!path && (mode === "original" || preparing.length === 0);
+  const opts: ExportSettings = {
+    path,
+    scale,
+    fps,
+    codec,
+    quality,
+    audio,
+    range,
+    vertical,
+    bitrateKbps: bitrateKbps ?? undefined,
+    audioKbps: sizeLimit ? SIZE_AUDIO_KBPS : undefined,
+  };
+
+  // Size-limited exports: lower resolution and frame rate as the bitrate gets tight.
+  useEffect(() => {
+    if (!bitrateKbps) return;
+    const targetH = bitrateKbps < 1200 ? 480 : bitrateKbps < 3500 ? 720 : bitrateKbps < 7000 ? 1080 : settings.height;
+    setScale(Math.min(1, targetH / settings.height));
+    setFps(bitrateKbps < 2500 ? Math.min(30, settings.fps) : settings.fps);
+  }, [bitrateKbps, settings.height, settings.fps]);
+
+  const applyPreset = (p: Preset) => {
+    setPreset(p);
+    if (p === "custom") return;
+    const has = (c: Codec) => encoders?.some((e) => e.codec === c);
+    setSizeLimit(p === "discord" ? 10 : p === "discord50" ? 50 : null);
+    setVertical(p === "shorts");
+    setQuality("high");
+    if (p === "youtube-hdr") {
+      setMode("original");
+      setHdr(true);
+      setCodec(has("hevc") ? "hevc" : "av1");
+      setScale(1);
+      setFps(settings.fps);
+      return;
+    }
+    setHdr(false);
+    if (has("h264")) setCodec("h264");
+    if (p === "youtube" || p === "shorts") {
+      setScale(p === "shorts" ? Math.min(1, 1920 / settings.height) : 1);
+      setFps(settings.fps);
+    }
+  };
 
   const setMode = (m: Mode) => {
     setModeState(m);
@@ -140,12 +229,12 @@ function ExportDialogBody() {
   const warnings = useMemo(() => {
     if (mode !== "original" || phase !== "setup") return [];
     try {
-      return planFor({ path, scale, fps, codec, quality, audio }, hdrOut).warnings;
+      return planFor(opts, hdrOut).warnings;
     } catch (e) {
       return [String(e)];
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mode, phase, clips, tracks, media, scale, fps, audio, hdrOut]);
+  }, [mode, phase, clips, tracks, media, scale, fps, audio, hdrOut, range, vertical]);
 
   const browse = async () => {
     const { save } = await import("@tauri-apps/plugin-dialog");
@@ -154,17 +243,35 @@ function ExportDialogBody() {
     setPath(/\.mp4$/i.test(picked) ? picked : `${picked}.mp4`);
   };
 
-  const run = async () => {
-    if (!encoder) return;
+  const rememberDir = async () => {
     try {
       const { dirname } = await import("@tauri-apps/api/path");
       localStorage.setItem(LAST_DIR_KEY, await dirname(path));
     } catch {
       /* optional */
     }
+  };
+
+  /** Original-files exports can render in the background while you keep editing. */
+  const addToQueue = async () => {
+    if (!encoder) return;
+    await rememberDir();
+    setQueued(true);
+    try {
+      await enqueueExport(opts, encoder.encoder, hdrOut);
+      close();
+    } catch (e) {
+      setQueued(false);
+      setError(e instanceof Error ? e.message : String(e));
+      setPhase("error");
+    }
+  };
+
+  const run = async () => {
+    if (!encoder) return;
+    await rememberDir();
     setPhase("running");
     setError("");
-    const opts = { path, scale, fps, codec, quality, audio };
     const h = mode === "original" ? startHqExport(opts, encoder.encoder, hdrOut, setProgress) : startExport(opts, encoder.encoder, setProgress);
     handle.current = h;
     try {
@@ -207,6 +314,57 @@ function ExportDialogBody() {
                 </button>
               </div>
             </div>
+            <label className="form-row">
+              <span>Preset</span>
+              <select value={preset} onChange={(e) => applyPreset(e.target.value as Preset)} {...tip(PRESETS.find((p) => p.key === preset)!.hint)}>
+                {PRESETS.filter((p) => p.key !== "youtube-hdr" || hdrSources).map((p) => (
+                  <option key={p.key} value={p.key}>
+                    {p.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <div className="form-row">
+              <span>Range</span>
+              <div className="range-picker">
+                <select value={rangeMode} onChange={(e) => setRangeMode(e.target.value as RangeMode)} {...tip("Which part of the timeline to export")}>
+                  <option value="all">Whole timeline</option>
+                  <option value="selection" disabled={!selectionSpan}>
+                    Selected clips
+                  </option>
+                  <option value="markers" disabled={markers.length < 2}>
+                    Between markers
+                  </option>
+                  <option value="custom">Custom…</option>
+                </select>
+                {rangeMode === "markers" && markers.length >= 2 && (
+                  <>
+                    <select value={markerRange[0]} onChange={(e) => setMarkerRange([Number(e.target.value), markerRange[1]])} aria-label="From marker">
+                      {markers.map((m, i) => (
+                        <option key={m.id} value={i}>
+                          {m.label}
+                        </option>
+                      ))}
+                    </select>
+                    →
+                    <select value={markerRange[1]} onChange={(e) => setMarkerRange([markerRange[0], Number(e.target.value)])} aria-label="To marker">
+                      {markers.map((m, i) => (
+                        <option key={m.id} value={i}>
+                          {m.label}
+                        </option>
+                      ))}
+                    </select>
+                  </>
+                )}
+                {rangeMode === "custom" && (
+                  <>
+                    <NumberField value={customRange[0]} min={0} max={timelineTotal} step={0.1} precision={2} unit="s" onChange={(v) => setCustomRange([v, customRange[1]])} aria-label="Start" />
+                    →
+                    <NumberField value={customRange[1]} min={0} max={timelineTotal} step={0.1} precision={2} unit="s" onChange={(v) => setCustomRange([customRange[0], v])} aria-label="End" />
+                  </>
+                )}
+              </div>
+            </div>
             <div className="form-row">
               <span>Render</span>
               <div className="segmented mode-seg" role="radiogroup">
@@ -233,11 +391,14 @@ function ExportDialogBody() {
             <label className="form-row">
               <span>Resolution</span>
               <select value={scale} onChange={(e) => setScale(Number(e.target.value))} {...tip("Output size relative to the project resolution (Project tab)")}>
-                {[1, 0.75, 0.5, 0.25].map((s) => (
-                  <option key={s} value={s}>
-                    {s * 100}% — {even(settings.width * s)}×{even(settings.height * s)}
-                  </option>
-                ))}
+                {[...new Set([1, 0.75, 0.5, 0.25, scale])].sort((a, b) => b - a).map((s) => {
+                  const o = outputSize(settings.width, settings.height, { scale: s, vertical });
+                  return (
+                    <option key={s} value={s}>
+                      {Math.round(s * 100)}% — {o.width}×{o.height}
+                    </option>
+                  );
+                })}
               </select>
             </label>
             <label className="form-row">
@@ -263,6 +424,12 @@ function ExportDialogBody() {
             </label>
             <div className="form-row">
               <span>Quality</span>
+              {sizeLimit ? (
+                <span className="muted small" {...tip("Set by the size limit: the bitrate is chosen so the file stays under it. Choose another preset (or Custom) for quality-based encoding.")}>
+                  Fits {sizeLimit} MB: {bitrateKbps?.toLocaleString()} kbit/s video + {SIZE_AUDIO_KBPS} kbit/s audio
+                  {bitrateKbps !== null && bitrateKbps < 400 && " — very low; consider a shorter range"}
+                </span>
+              ) : (
               <div className="segmented quality-seg" role="radiogroup">
                 {(["high", "balanced", "small"] as Quality[]).map((q) => (
                   <button
@@ -277,7 +444,15 @@ function ExportDialogBody() {
                   </button>
                 ))}
               </div>
+              )}
             </div>
+            <label className="form-row">
+              <span>Framing</span>
+              <span className="checkbox-row" {...tip("Vertical 9:16 video for Shorts, TikTok and Reels: the centre of the frame at full height. Move clips (Position X) to choose what's in view.")}>
+                <input type="checkbox" checked={vertical} onChange={(e) => setVertical(e.target.checked)} />
+                Vertical 9:16 (centre of the frame)
+              </span>
+            </label>
             {mode === "original" && hdrSources && (
               <label className="form-row">
                 <span>HDR</span>
@@ -295,6 +470,7 @@ function ExportDialogBody() {
               </span>
             </label>
             <p className="muted small export-summary">
+              {range.start > 0 || range.end < timelineTotal ? `${formatTime(range.start, fps)}–${formatTime(range.end, fps)} · ` : ""}
               {formatTime(total, fps)} · {frames.toLocaleString()} frames · {width}×{height} · {hdrOut ? "HDR10 (PQ, BT.2020)" : "SDR (BT.709)"}
             </p>
             {mode === "original" && warnings.length > 0 && (
@@ -309,6 +485,15 @@ function ExportDialogBody() {
             {encoders?.length === 0 && <p className="export-warn">ffmpeg with a usable encoder wasn't found. {error}</p>}
             <div className="modal-actions">
               <button onClick={close}>Cancel</button>
+              {mode === "original" && (
+                <button
+                  disabled={!canExport || queued}
+                  onClick={addToQueue}
+                  {...tip("Render in the background and keep editing. The export uses the timeline as it is now; later edits aren't included. Progress is under ⏳ in the toolbar.")}
+                >
+                  Add to queue
+                </button>
+              )}
               <button className="primary" disabled={!canExport} onClick={run}>
                 Export
               </button>

@@ -1,8 +1,11 @@
 import { useStore } from "../store";
 import type { AnimProp, Clip, MediaItem, Track } from "../types";
-import { effectValueAt, transformAt, valueAt } from "../lib/keyframes";
+import { effectValueAt, transformAt } from "../lib/keyframes";
 import { buildAudioEffect, canvasFiltersSupported, cssFilter, drawOverlays, type AudioEffectNodes } from "../lib/effects";
-import { activeRange, clipDuration, timelineEnd, trackFrameAt } from "../lib/timeline";
+import { activeRange, timelineEnd, trackFrameAt } from "../lib/timeline";
+import { clipGain } from "../lib/gain";
+import { sourceTime, timeMap } from "../lib/speed";
+import { renderTitle } from "../lib/titles";
 import { easedProgress, renderTransition } from "../lib/transitions";
 
 /** Seconds before a clip's start at which its media is pre-seeked during playback. */
@@ -268,7 +271,7 @@ class Player {
     if (!el.paused) el.pause();
     const maxT = Math.max(0, (m.duration || c.trimOut) - 0.001);
     // A hair past the exact time so float rounding never lands on the previous frame.
-    const src = Math.min(maxT, Math.max(0, c.trimIn + (t - c.start)) + 1e-4);
+    const src = Math.min(maxT, Math.max(0, sourceTime(c, t - c.start)) + 1e-4);
     const once = (ev: string, ms: number) =>
       new Promise<void>((resolve) => {
         const done = () => {
@@ -333,10 +336,13 @@ class Player {
       }
       // Source time; transition handles may reach past the trim points, so clamp to the file.
       const maxT = Math.max(0, (m.duration || c.trimOut) - 0.001);
-      const src = Math.min(maxT, Math.max(0, c.trimIn + (t - c.start)));
+      const src = Math.min(maxT, Math.max(0, sourceTime(c, t - c.start)));
+      // Speed changes play through the element's rate (pitch preserved for audio).
+      const rate = Math.min(16, Math.max(0.0625, timeMap(c).speedAt(t - c.start)));
+      if (Math.abs(el.playbackRate - rate) > 1e-3) el.playbackRate = rate;
 
       if (audio) {
-        const gain = silent ? 0 : audioGain(c, t);
+        const gain = silent ? 0 : clipGain(c, t);
         const chain = this.chainFor(c, el);
         if (chain) {
           el.volume = 1;
@@ -393,6 +399,11 @@ class Player {
       const m = media.get(c.mediaId);
       const local = t - c.start;
       const tr = transformAt(c, local);
+      if (c.title) {
+        // Text is rendered at frame size, so it fits 1:1 like a full-frame image.
+        drawSource(cx, renderTitle(c.title, w, h), w, h, tr, alpha, w, h, c, local);
+        return;
+      }
       if (m?.kind === "image") {
         if (m.status !== "ready") return;
         const img = this.imageFor(m);
@@ -418,17 +429,10 @@ class Player {
   }
 }
 
-/** Clip volume (keyframeable) × fade in/out, at timeline time `t`. */
-export function audioGain(c: Clip, t: number): number {
-  const local = t - c.start;
-  const dur = clipDuration(c);
-  let g = Math.max(0, Math.min(1, valueAt(c, "volume", local) / 100));
-  if (c.fadeIn > 0 && local < c.fadeIn) g *= Math.max(0, local / c.fadeIn);
-  if (c.fadeOut > 0 && local > dur - c.fadeOut) g *= Math.max(0, (dur - local) / c.fadeOut);
-  return g;
-}
+/** Clip gain at timeline time `t`: volume keyframes × fades × music ducking (see lib/gain.ts). */
+export const audioGain = clipGain;
 
-/** Draws a video frame or still, fitted ("contain") into the frame, with the clip transform. */
+/** Draws a video frame, still or text, fitted ("contain") into the frame, with the clip's crop and transform. */
 function drawSource(
   ctx: CanvasRenderingContext2D,
   src: CanvasImageSource,
@@ -459,8 +463,19 @@ function drawSource(
     const own = cssFilter(clip, local, h);
     ctx.filter = [outer, own === "none" ? "" : own].filter(Boolean).join(" ") || "none";
   }
-  ctx.drawImage(src, -dw / 2, -dh / 2, dw, dh);
-  drawOverlays(ctx, clip, local, -dw / 2, -dh / 2, dw, dh);
+  // Crop removes edges; what's left stays where it was.
+  const cl = Math.min(0.99, Math.max(0, tr.cropLeft / 100));
+  const cr = Math.min(0.99 - cl, Math.max(0, tr.cropRight / 100));
+  const ct = Math.min(0.99, Math.max(0, tr.cropTop / 100));
+  const cb = Math.min(0.99 - ct, Math.max(0, tr.cropBottom / 100));
+  const fx = 1 - cl - cr;
+  const fy = 1 - ct - cb;
+  if (fx > 0 && fy > 0) {
+    const x0 = -dw / 2 + dw * cl;
+    const y0 = -dh / 2 + dh * ct;
+    ctx.drawImage(src, sw * cl, sh * ct, sw * fx, sh * fy, x0, y0, dw * fx, dh * fy);
+    drawOverlays(ctx, clip, local, x0, y0, dw * fx, dh * fy);
+  }
   ctx.restore();
 }
 

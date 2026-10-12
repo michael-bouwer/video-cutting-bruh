@@ -1,3 +1,4 @@
+import { snapExtras } from "./snapExtras";
 import { useStore } from "../store";
 import { fitStart, snap, snapPoints } from "./timeline";
 import { timeAtClientX } from "../components/Timeline";
@@ -38,7 +39,7 @@ function target(x: number, y: number, kind: TrackKind, duration: number) {
   const { tracks, clips, zoom, currentTime, snapping } = useStore.getState();
 
   let start = timeAtClientX(x);
-  if (snapping) start = snap(start, snapPoints(clips, new Set(), currentTime), SNAP_PX / zoom).t;
+  if (snapping) start = snap(start, snapPoints(clips, new Set(), currentTime, snapExtras()), SNAP_PX / zoom).t;
 
   const zone = hit.closest<HTMLElement>("[data-new-track]");
   if (zone?.dataset.newTrack === kind) return { trackId: null, toNewTrack: true, at: start };

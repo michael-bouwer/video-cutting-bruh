@@ -17,6 +17,10 @@ import { useFileDrop, useShortcuts } from "./hooks";
 import { installHistory } from "./lib/history";
 import { installProjectLifecycle } from "./lib/project";
 import { usePanelSizes } from "./lib/layout";
+import { installVisuals } from "./lib/visuals";
+import { installUpdateCheck } from "./lib/updater";
+import { ContextMenuHost } from "./components/ContextMenu";
+import { PasteAttributesDialog } from "./components/PasteAttributesDialog";
 
 export default function App() {
   const drop = useFileDrop();
@@ -25,6 +29,8 @@ export default function App() {
   useShortcuts();
   useEffect(() => installHistory(), []);
   useEffect(() => installProjectLifecycle(), []);
+  useEffect(() => installVisuals(), []);
+  useEffect(() => installUpdateCheck(), []);
 
   const vars = {
     "--bin-w": `${sizes.bin}px`,
@@ -54,6 +60,8 @@ export default function App() {
       <MediaDragGhost />
       <NewProjectDialog />
       <ExportDialog />
+      <PasteAttributesDialog />
+      <ContextMenuHost />
       <DialogHost />
       <TooltipLayer />
     </div>

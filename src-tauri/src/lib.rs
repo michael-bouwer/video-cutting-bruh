@@ -1,5 +1,6 @@
 mod cache;
 mod export;
+mod visuals;
 mod ffmpeg;
 mod probe;
 mod project;
@@ -68,6 +69,9 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_window_state::Builder::default().build())
+        // In-app update check (desktop): see src/lib/updater.ts and scripts/release.mjs.
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .manage(ffmpeg::ProxyJobs::default())
         .manage(export::ExportJobs::default())
         .manage(export::HqJobs::default())
@@ -95,13 +99,16 @@ pub fn run() {
             export::export_encoders,
             export::export_audio_segment,
             export::export_save_audio,
+            export::export_save_png,
             export::export_begin,
             export::export_frame,
             export::export_end,
             export::export_cancel,
             export::export_hq_begin,
             export::export_hq_status,
-            export::export_hq_cancel
+            export::export_hq_cancel,
+            visuals::media_waveform,
+            visuals::media_thumbnails
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

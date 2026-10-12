@@ -8,6 +8,8 @@ import { redo, undo } from "../lib/history";
 import { Dropdown, MenuItem, kbd } from "./ui";
 import { tip } from "./Tooltip";
 import { setThemePref, useTheme, type ThemePref } from "../lib/theme";
+import { QueueMenu } from "./QueueMenu";
+import { checkForUpdates } from "../lib/updater";
 
 export function Toolbar() {
   const settings = useStore((s) => s.settings);
@@ -78,6 +80,7 @@ export function Toolbar() {
         >
           ⤓<span className="collapse-label"> Export</span>
         </button>
+        <QueueMenu />
         <ThemeMenu />
         <label
           className={`toggle ${settings.allowHdr ? "on" : ""}`}
@@ -123,6 +126,7 @@ function FileMenu() {
             <div className="menu-sep" />
             <MenuItem label="Import media…" shortcut={kbd("Mod+I")} onClick={run(openImportDialog)} />
             <MenuItem label="Export video…" shortcut={kbd("Mod+E")} onClick={run(openExport)} />
+            <MenuItem label="Check for updates…" onClick={run(() => checkForUpdates(true))} />
             <div className="menu-sep" />
             <div className="menu-heading">Recent projects</div>
             {recent.length === 0 ? (

@@ -3,7 +3,8 @@ import { player, audioGain } from "../engine/player";
 import { useStore } from "../store";
 import { buildAudioEffect } from "./effects";
 import { effectValueAt } from "./keyframes";
-import { clipDuration, timelineEnd } from "./timeline";
+import { clipDuration, clipEnd, timelineEnd } from "./timeline";
+import { audioTempo } from "./speed";
 
 /**
  * Export = render every frame with the preview engine and stream the pixels to
@@ -28,6 +29,26 @@ export interface ExportSettings {
   codec: Codec;
   quality: Quality;
   audio: boolean;
+  /** Part of the timeline to export (default: all of it). */
+  range?: { start: number; end: number };
+  /** 9:16 output: the centre of the frame, full height (Shorts / TikTok / Reels). */
+  vertical?: boolean;
+  /** Average video bitrate (kbit/s) instead of constant quality, e.g. to fit a size limit. */
+  bitrateKbps?: number;
+  audioKbps?: number;
+}
+
+/** The part of the timeline an export covers. */
+export function exportRange(opts: Pick<ExportSettings, "range">, total: number): { start: number; end: number } {
+  const start = Math.max(0, Math.min(total, opts.range?.start ?? 0));
+  const end = Math.max(start, Math.min(total, opts.range?.end ?? total));
+  return { start, end };
+}
+
+/** Output size for the project size × scale (and 9:16 framing). */
+export function outputSize(width: number, height: number, opts: Pick<ExportSettings, "scale" | "vertical">): { width: number; height: number } {
+  const h = even(height * opts.scale);
+  return { width: opts.vertical ? even((h * 9) / 16) : even(width * opts.scale), height: h };
 }
 
 export interface ExportProgress {
@@ -84,25 +105,45 @@ function encodeWav(buf: AudioBuffer): Uint8Array {
  * the preview (clip volume keyframes × fades × track mute/solo, audio effects).
  * Audio is taken from the original files, not the preview copies.
  */
-async function renderAudioMix(total: number, isCancelled: () => boolean): Promise<Uint8Array | null> {
+async function renderAudioMix(range: { start: number; end: number }, isCancelled: () => boolean): Promise<Uint8Array | null> {
   const st = useStore.getState();
   const anySolo = st.tracks.some((t) => t.kind === "audio" && t.solo);
   const audible = st.clips.filter((c) => {
     const track = st.tracks.find((t) => t.id === c.trackId);
     const m = st.media.find((x) => x.id === c.mediaId);
-    return track?.kind === "audio" && !track.muted && (!anySolo || track.solo) && m && m.status !== "missing" && m.status !== "error";
+    return (
+      track?.kind === "audio" &&
+      !track.muted &&
+      (!anySolo || track.solo) &&
+      m &&
+      m.status !== "missing" &&
+      m.status !== "error" &&
+      clipEnd(c) > range.start &&
+      c.start < range.end
+    );
   });
   if (audible.length === 0) return null;
 
   const sampleRate = 48000;
+  const total = range.end - range.start;
+  // Timeline time → time in the mix.
+  const at = (t: number) => Math.max(0, t - range.start);
   const ctx = new OfflineAudioContext(2, Math.max(1, Math.ceil(total * sampleRate)), sampleRate);
   for (const c of audible) {
     if (isCancelled()) return null;
     const m = st.media.find((x) => x.id === c.mediaId)!;
     const dur = clipDuration(c);
+    // ffmpeg retimes the audio for speed changes, so the WAV runs in timeline time.
+    const tempo = audioTempo(c, `t${c.id}`);
     let wav: string;
     try {
-      wav = await invoke<string>("export_audio_segment", { path: m.path, start: c.trimIn, duration: dur });
+      wav = await invoke<string>("export_audio_segment", {
+        path: m.path,
+        start: c.trimIn,
+        duration: c.trimOut - c.trimIn,
+        filters: tempo.filters,
+        cmds: tempo.cmds ? [`t${c.id}.cmd`, tempo.cmds] : null,
+      });
     } catch {
       continue; // no audio stream in that file
     }
@@ -116,19 +157,22 @@ async function renderAudioMix(total: number, isCancelled: () => boolean): Promis
       if (!nodes) continue;
       const animated = Object.values(fx.keyframes).some((k) => k.length > 0);
       // Static effects need one update; animated ones are sampled 20× a second.
-      for (let ts = c.start; ts <= c.start + dur + 1e-6; ts += animated ? 0.05 : Infinity) {
-        nodes.update((k) => effectValueAt(fx, k, ts - c.start), ts);
+      for (let ts = Math.max(c.start, range.start); ts <= c.start + dur + 1e-6; ts += animated ? 0.05 : Infinity) {
+        nodes.update((k) => effectValueAt(fx, k, ts - c.start), at(ts));
       }
       tail.connect(nodes.input);
       tail = nodes.output;
     }
     // Volume keyframes and fades, as a smooth gain envelope (100 points/s).
     const gain = ctx.createGain();
-    gain.gain.setValueAtTime(audioGain(c, c.start), c.start);
-    for (let ts = c.start + 0.01; ts < c.start + dur; ts += 0.01) gain.gain.linearRampToValueAtTime(audioGain(c, ts), ts);
-    gain.gain.linearRampToValueAtTime(audioGain(c, c.start + dur), c.start + dur);
+    const from = Math.max(c.start, range.start);
+    gain.gain.setValueAtTime(audioGain(c, from), at(from));
+    for (let ts = from + 0.01; ts < c.start + dur; ts += 0.01) gain.gain.linearRampToValueAtTime(audioGain(c, ts), at(ts));
+    gain.gain.linearRampToValueAtTime(audioGain(c, c.start + dur), at(c.start + dur));
     tail.connect(gain).connect(ctx.destination);
-    src.start(c.start, 0, dur);
+    // Clips that start before the range begin part-way in.
+    const skip = from - c.start;
+    src.start(at(from), skip, Math.max(0, dur - skip));
   }
   if (isCancelled()) return null;
   return encodeWav(await ctx.startRendering());
@@ -148,25 +192,45 @@ export function startExport(opts: ExportSettings, encoder: string, onProgress: (
 
   const done = (async () => {
     const st = useStore.getState();
-    const total = timelineEnd(st.clips);
-    if (total <= 0) throw new Error("The timeline is empty");
-    const width = even(st.settings.width * opts.scale);
-    const height = even(st.settings.height * opts.scale);
+    const range = exportRange(opts, timelineEnd(st.clips));
+    const total = range.end - range.start;
+    if (total <= 0) throw new Error("Nothing to export in that range");
+    const { width, height } = outputSize(st.settings.width, st.settings.height, opts);
+    // The full frame is rendered at this size; vertical exports take its centre.
+    const frameW = opts.vertical ? even(st.settings.width * opts.scale) : width;
     const frames = Math.max(1, Math.ceil(total * opts.fps - 1e-6));
 
     onProgress({ phase: "audio", frame: 0, frames, speed: 0, eta: 0 });
-    const wav = opts.audio ? await renderAudioMix(total, isCancelled) : null;
+    const wav = opts.audio ? await renderAudioMix(range, isCancelled) : null;
     if (cancelled) throw new Error("cancelled");
     const audioPath = wav ? await invoke<string>("export_save_audio", wav) : null;
 
     jobId = await invoke<string>("export_begin", {
-      opts: { path: opts.path, width, height, fps: opts.fps, encoder, codec: opts.codec, quality: opts.quality, audioPath },
+      opts: {
+        path: opts.path,
+        width,
+        height,
+        fps: opts.fps,
+        encoder,
+        codec: opts.codec,
+        quality: opts.quality,
+        audioPath,
+        bitrateKbps: opts.bitrateKbps ?? null,
+        audioKbps: opts.audioKbps ?? null,
+      },
     });
 
     const canvas = document.createElement("canvas");
     canvas.width = width;
     canvas.height = height;
     const ctx = canvas.getContext("2d", { alpha: false, willReadFrequently: true })!;
+    let frameCtx = ctx;
+    if (frameW !== width) {
+      const full = document.createElement("canvas");
+      full.width = frameW;
+      full.height = height;
+      frameCtx = full.getContext("2d", { alpha: false })!;
+    }
 
     player.beginExport();
     const started = performance.now();
@@ -174,7 +238,8 @@ export function startExport(opts: ExportSettings, encoder: string, onProgress: (
     try {
       for (let i = 0; i < frames; i++) {
         if (cancelled) throw new Error("cancelled");
-        await player.renderFrame(ctx, i / opts.fps, width, height);
+        await player.renderFrame(frameCtx, range.start + i / opts.fps, frameW, height);
+        if (frameCtx !== ctx) ctx.drawImage(frameCtx.canvas, (frameW - width) / 2, 0, width, height, 0, 0, width, height);
         const pixels = new Uint8Array(ctx.getImageData(0, 0, width, height).data.buffer);
         // Keep one frame in flight: render the next while ffmpeg receives this one.
         if (inflight) await inflight;

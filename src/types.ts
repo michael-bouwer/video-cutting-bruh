@@ -140,7 +140,20 @@ export interface Keyframe {
 }
 
 /** Animatable property keys. Add new ones in `lib/props.ts`. */
-export type AnimProp = "x" | "y" | "scale" | "rotation" | "opacity" | "volume";
+export type AnimProp =
+  | "x"
+  | "y"
+  | "scale"
+  | "rotation"
+  | "opacity"
+  | "volume"
+  /** Playback speed in % (keyframed = speed ramp); see lib/speed.ts. */
+  | "speed"
+  /** Crop from each edge, in % of the picture (the rest stays in place). */
+  | "cropLeft"
+  | "cropRight"
+  | "cropTop"
+  | "cropBottom";
 
 export type TrackKind = "video" | "audio";
 
@@ -156,6 +169,41 @@ export interface Track {
   solo: boolean;
   /** Locked tracks can't be edited. */
   locked: boolean;
+  /**
+   * Audio: a music track. It's turned down automatically while other audio is
+   * loud (ducking), and beats detected in it become snap points.
+   */
+  music?: boolean;
+  /** Music tracks: how far to turn down (dB, negative) while other audio plays. Default −12. */
+  duckDb?: number;
+}
+
+/** A named point on the timeline (M adds one at the playhead). */
+export interface Marker {
+  id: string;
+  t: number;
+  label: string;
+  color: string;
+}
+
+/** Text clip style. Sizes are in pixels at 1080p and scale with the output. */
+export interface TitleStyle {
+  text: string;
+  font: string;
+  size: number;
+  color: string;
+  bold: boolean;
+  italic: boolean;
+  align: "left" | "center" | "right";
+  /** Outline width (0 = none). */
+  outline: number;
+  outlineColor: string;
+  shadow: boolean;
+  /** Background box behind the text. */
+  box: boolean;
+  boxColor: string;
+  /** 0..100 */
+  boxOpacity: number;
 }
 
 /** See lib/effects.ts for the registry of effect types and their parameters. */
@@ -208,6 +256,12 @@ export interface Clip {
   keyframes: Record<AnimProp, Keyframe[]>;
   /** Effect stack, applied top to bottom. */
   effects: Effect[];
+  /** Custom name shown on the timeline (default: the media's file name). */
+  label?: string;
+  /** Colour label key (see lib/clipLabels.ts); default: a colour per media file. */
+  color?: string;
+  /** Text clip: no media (`mediaId` is ""), rendered from this style. */
+  title?: TitleStyle;
 }
 
 /**

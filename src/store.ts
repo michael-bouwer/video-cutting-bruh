@@ -16,11 +16,14 @@ import type {
   EffectType,
   KeyframeRef,
   Curve,
+  Marker,
+  TitleStyle,
 } from "./types";
-import { defaultBase, emptyKeyframes, PROP_KEYS } from "./lib/props";
+import { defaultBase, emptyKeyframes, PROP_KEYS, SPEED_MAX, SPEED_MIN } from "./lib/props";
 import { interpolate, keyframeNear, randomKeyframeColor, sortKeyframes } from "./lib/keyframes";
 import { effectDef, newEffect } from "./lib/effects";
 import { clipDuration, clipEnd, fitStart, fits, MIN_CLIP, timelineEnd, TOUCH_EPS, trackClips } from "./lib/timeline";
+import { sourceTime, timeMap } from "./lib/speed";
 import type { MediaDrag } from "./lib/mediaDrag";
 
 // Kept here (not imported from lib/media) to avoid a circular import.
@@ -52,6 +55,29 @@ export const defaultTracks = (): Track[] => [newTrack("video", 1), newTrack("aud
 const trackKindFor = (m: MediaItem): TrackKind => (m.kind === "audio" ? "audio" : "video");
 /** Videos get a linked audio clip unless we know they're silent. */
 const wantsAudio = (m: MediaItem) => m.kind === "video" && m.probe?.hasAudio !== false;
+
+/** Groups of clip attributes that can be copied between clips. */
+export type AttributePart = "transform" | "crop" | "speed" | "effects" | "volume" | "color";
+
+export const MARKER_COLORS = ["#f5c542", "#4fc3f7", "#ef5350", "#66bb6a", "#ba68c8", "#ff9800"];
+
+export function defaultTitle(): TitleStyle {
+  return {
+    text: "Your text",
+    font: "Inter, system-ui, sans-serif",
+    size: 96,
+    color: "#ffffff",
+    bold: true,
+    italic: false,
+    align: "center",
+    outline: 0,
+    outlineColor: "#000000",
+    shadow: true,
+    box: false,
+    boxColor: "#000000",
+    boxOpacity: 60,
+  };
+}
 
 export interface PlaceOptions {
   trackId?: string;
@@ -161,6 +187,24 @@ interface State {
   removeKeyframe: (clipId: string, prop: AnimProp, kfId: string) => void;
   resetTransform: (clipId: string) => void;
 
+  // Markers
+  markers: Marker[];
+  addMarker: (t: number, label?: string) => string;
+  updateMarker: (id: string, patch: Partial<Omit<Marker, "id">>) => void;
+  removeMarker: (id: string) => void;
+
+  // Text clips
+  /** Adds a text clip at the playhead on the highest video track with room. */
+  addTitle: () => void;
+  updateTitle: (clipId: string, patch: Partial<TitleStyle>) => void;
+
+  /** Name / colour label for clips (empty resets to the default). */
+  setClipMeta: (ids: string[], patch: { label?: string; color?: string }) => void;
+  /** Copies chosen attributes of `source` onto clips. */
+  pasteAttributes: (ids: string[], source: Clip, parts: AttributePart[]) => void;
+  /** Constant speed (%) for clips, removing any speed ramp. */
+  setSpeed: (ids: string[], pct: number) => void;
+
   seek: (t: number) => void;
   setPlaying: (p: boolean) => void;
   select: (s: Selection) => void;
@@ -176,7 +220,8 @@ const mapClip = (clips: Clip[], id: string, fn: (c: Clip) => Clip) => clips.map(
 /** A clip plus everything linked to it. */
 export const groupOf = (clips: Clip[], clip: Clip) => (clip.linkId ? clips.filter((c) => c.linkId === clip.linkId) : [clip]);
 
-function shiftKeyframes(c: Clip, by: number): Pick<Clip, "keyframes" | "effects"> {
+/** Moves every keyframe of a clip (transform and effects) by `by` seconds. */
+export function shiftKeyframes(c: Clip, by: number): Pick<Clip, "keyframes" | "effects"> {
   if (by === 0) return { keyframes: c.keyframes, effects: c.effects };
   const shift = (kfs: Keyframe[]) => kfs.map((kf) => ({ ...kf, t: kf.t + by }));
   return {
@@ -290,12 +335,63 @@ function makeClip(mediaId: string, trackId: string, start: number, duration: num
   };
 }
 
-export const useStore = create<State>((set, get) => {
+/**
+ * After an edit that changed clips' speed (base value or speed keyframes):
+ * linked partners get the same speed (video and audio stay in sync), and a
+ * clip that became longer is shortened so it doesn't run into the next clip
+ * on any of its group's tracks.
+ */
+function syncSpeed(prev: Clip[], next: Clip[]): Clip[] {
+  const before = new Map(prev.map((c) => [c.id, c]));
+  const changed = next.filter((c) => {
+    const p = before.get(c.id);
+    return p && (p.keyframes.speed !== c.keyframes.speed || p.base.speed !== c.base.speed);
+  });
+  if (changed.length === 0) return next;
+  let out = next;
+  for (const c of changed) {
+    if (!c.linkId) continue;
+    out = out.map((x) =>
+      x.linkId === c.linkId && x.id !== c.id && (x.keyframes.speed !== c.keyframes.speed || x.base.speed !== c.base.speed)
+        ? { ...x, base: { ...x.base, speed: c.base.speed }, keyframes: { ...x.keyframes, speed: c.keyframes.speed } }
+        : x,
+    );
+  }
+  const groups = new Set(changed.map((c) => c.linkId ?? c.id));
+  for (const g of groups) {
+    const members = out.filter((x) => (x.linkId ?? x.id) === g);
+    const ids = new Set(members.map((m) => m.id));
+    let allowed = Infinity;
+    for (const m of members) {
+      for (const x of out) {
+        if (x.trackId === m.trackId && !ids.has(x.id) && x.start >= m.start + TOUCH_EPS) allowed = Math.min(allowed, x.start);
+      }
+    }
+    out = out.map((m) => {
+      if (!ids.has(m.id) || clipEnd(m) <= allowed + TOUCH_EPS) return m;
+      const fitted = { ...m, trimOut: Math.max(m.trimIn + 0.01, sourceTime(m, allowed - m.start)) };
+      const dur = clipDuration(fitted);
+      return { ...fitted, fadeIn: Math.min(m.fadeIn, dur), fadeOut: Math.min(m.fadeOut, dur) };
+    });
+  }
+  return out;
+}
+
+export const useStore = create<State>((rawSet, get) => {
+  // Every clip update passes through the speed sync above.
+  const set: typeof rawSet = (partial) =>
+    rawSet((state) => {
+      const patch = typeof partial === "function" ? partial(state) : partial;
+      if (patch && patch.clips && patch.clips !== state.clips) return { ...patch, clips: syncSpeed(state.clips, patch.clips) };
+      return patch;
+    });
   const isLocked = (trackId: string) => get().tracks.find((t) => t.id === trackId)?.locked ?? false;
-  const isImage = (c: Clip) => get().media.find((x) => x.id === c.mediaId)?.kind === "image";
+  // Stills and text clips have no source length: they can be any length.
+  const isImage = (c: Clip) => !!c.title || get().media.find((x) => x.id === c.mediaId)?.kind === "image";
   const maxDuration = (c: Clip) => {
+    if (isImage(c)) return IMAGE_MAX_DURATION;
     const m = get().media.find((x) => x.id === c.mediaId);
-    return m?.kind === "image" ? IMAGE_MAX_DURATION : (m?.duration || c.trimOut);
+    return m?.duration || c.trimOut;
   };
 
   /**
@@ -581,17 +677,20 @@ export const useStore = create<State>((set, get) => {
       // Allowed range of delta, intersected over the linked group so they stay in sync.
       let lo = -Infinity;
       let hi = Infinity;
+      // Deltas are in timeline time; lib/speed.ts converts them to source time for retimed clips.
       for (const c of group) {
+        const tm = timeMap(c);
+        const dur = tm.duration;
         const neighbours = trackClips(clips, c.trackId).filter((x) => !ids.has(x.id));
         if (edge === "in") {
           const prevEnd = Math.max(0, ...neighbours.filter((x) => clipEnd(x) <= c.start + TOUCH_EPS).map(clipEnd));
           // Can't reveal before the source's first frame (stills have no start) or overlap the previous clip.
-          lo = Math.max(lo, isImage(c) ? -Infinity : -c.trimIn, prevEnd - c.start);
-          hi = Math.min(hi, c.trimOut - MIN_CLIP - c.trimIn);
+          lo = Math.max(lo, isImage(c) ? -Infinity : tm.local(-c.trimIn), prevEnd - c.start);
+          hi = Math.min(hi, dur - MIN_CLIP);
         } else {
           const nextStart = Math.min(Infinity, ...neighbours.filter((x) => x.start >= clipEnd(c) - TOUCH_EPS).map((x) => x.start));
-          lo = Math.max(lo, c.trimIn + MIN_CLIP - c.trimOut);
-          hi = Math.min(hi, maxDuration(c) - c.trimOut, nextStart - clipEnd(c));
+          lo = Math.max(lo, MIN_CLIP - dur);
+          hi = Math.min(hi, tm.local(maxDuration(c) - c.trimIn) - dur, nextStart - clipEnd(c));
         }
       }
       if (lo > hi) return;
@@ -601,29 +700,23 @@ export const useStore = create<State>((set, get) => {
       set((s) => ({
         clips: s.clips.map((c) => {
           if (!ids.has(c.id)) return c;
+          const tm = timeMap(c);
           if (edge === "out") {
-            const trimOut = c.trimOut + delta;
-            const dur = trimOut - c.trimIn;
+            const trimOut = c.trimIn + tm.src(tm.duration + delta);
+            const dur = clipDuration({ ...c, trimOut });
             return { ...c, trimOut, fadeIn: Math.min(c.fadeIn, dur), fadeOut: Math.min(c.fadeOut, dur) };
           }
           // Head trim: start and in-point move together, so the rest stays put in time.
-          let trimIn = c.trimIn + delta;
+          let trimIn = c.trimIn + tm.src(delta);
           let trimOut = c.trimOut;
           if (trimIn < 0) {
             // Stills: lengthen from the front by moving the out-point instead.
             trimOut -= trimIn;
             trimIn = 0;
           }
-          const dur = trimOut - trimIn;
-          return {
-            ...c,
-            start: c.start + delta,
-            trimIn,
-            trimOut,
-            ...shiftKeyframes(c, -delta),
-            fadeIn: Math.min(c.fadeIn, dur),
-            fadeOut: Math.min(c.fadeOut, dur),
-          };
+          const next = { ...c, start: c.start + delta, trimIn, trimOut, ...shiftKeyframes(c, -delta) };
+          const dur = clipDuration(next);
+          return { ...next, fadeIn: Math.min(c.fadeIn, dur), fadeOut: Math.min(c.fadeOut, dur) };
         }),
       }));
     },
@@ -631,9 +724,10 @@ export const useStore = create<State>((set, get) => {
     trimClip: (id, trimIn, trimOut) => {
       const c = get().clips.find((x) => x.id === id);
       if (!c) return;
-      if (trimIn !== c.trimIn) get().trimEdge(id, "in", c.start + (trimIn - c.trimIn));
+      // Source times → timeline positions of the edges (they differ for retimed clips).
+      if (trimIn !== c.trimIn) get().trimEdge(id, "in", c.start + timeMap(c).local(trimIn - c.trimIn));
       const after = get().clips.find((x) => x.id === id)!;
-      if (trimOut !== after.trimOut) get().trimEdge(id, "out", clipEnd(after) + (trimOut - after.trimOut));
+      if (trimOut !== after.trimOut) get().trimEdge(id, "out", after.start + timeMap(after).local(trimOut - after.trimIn));
     },
 
     duplicateClip: (id) => {
@@ -768,13 +862,14 @@ export const useStore = create<State>((set, get) => {
       let selectId: string | null = null;
       for (const c of targets) {
         const local = t - c.start;
-        const left: Clip = { ...c, trimOut: c.trimIn + local, fadeOut: 0, keyframes: emptyKeyframes(), effects: [] };
+        const cut = sourceTime(c, local);
+        const left: Clip = { ...c, trimOut: cut, fadeOut: 0, keyframes: emptyKeyframes(), effects: [] };
         const linkId = c.linkId ? (newLinks.get(c.linkId) ?? newLinks.set(c.linkId, uid()).get(c.linkId)!) : null;
         const right: Clip = {
           ...c,
           id: uid(),
           start: t,
-          trimIn: c.trimIn + local,
+          trimIn: cut,
           linkId,
           fadeIn: 0,
           transitionIn: { type: "cut", duration: c.transitionIn.duration },
@@ -920,6 +1015,107 @@ export const useStore = create<State>((set, get) => {
       set((s) => ({
         clips: mapClip(s.clips, clipId, (c) => ({ ...c, base: defaultBase(), keyframes: emptyKeyframes(), fadeIn: 0, fadeOut: 0 })),
       })),
+
+    // ---- Markers ----------------------------------------------------------------------------
+
+    markers: [],
+    addMarker: (t, label) => {
+      const { markers } = get();
+      const id = uid();
+      const marker: Marker = {
+        id,
+        t: Math.max(0, t),
+        label: label ?? `Marker ${markers.length + 1}`,
+        color: MARKER_COLORS[markers.length % MARKER_COLORS.length],
+      };
+      set({ markers: [...markers, marker].sort((a, b) => a.t - b.t) });
+      return id;
+    },
+    updateMarker: (id, patch) =>
+      set((s) => ({
+        markers: s.markers.map((m) => (m.id === id ? { ...m, ...patch, t: Math.max(0, patch.t ?? m.t) } : m)).sort((a, b) => a.t - b.t),
+      })),
+    removeMarker: (id) => set((s) => ({ markers: s.markers.filter((m) => m.id !== id) })),
+
+    // ---- Text clips ---------------------------------------------------------------------------
+
+    addTitle: () => {
+      const { currentTime, tracks } = get();
+      const dur = 5;
+      // Text goes on top: the highest video track with room, else a new one.
+      const free = [...tracks].reverse().find((t) => t.kind === "video" && !t.locked && fits(get().clips, t.id, currentTime, dur, new Set()));
+      const trackId = free?.id ?? get().addTrack("video");
+      const clip: Clip = { ...makeClip("", trackId, currentTime, dur, null), title: defaultTitle() };
+      set((s) => ({ clips: [...s.clips, clip], selection: { kind: "clip", clipId: clip.id }, clipSelection: [clip.id], rightTab: "inspector" }));
+    },
+    updateTitle: (clipId, patch) =>
+      set((s) => ({ clips: mapClip(s.clips, clipId, (c) => (c.title ? { ...c, title: { ...c.title, ...patch } } : c)) })),
+
+    // ---- Clip labels & attributes ---------------------------------------------------------------
+
+    setClipMeta: (ids, patch) => {
+      const want = new Set(ids);
+      set((s) => ({
+        clips: s.clips.map((c) => {
+          if (!want.has(c.id)) return c;
+          const next = { ...c, ...patch };
+          if (!next.label) delete next.label;
+          if (!next.color) delete next.color;
+          return next;
+        }),
+      }));
+    },
+
+    pasteAttributes: (ids, source, parts) => {
+      const kindOf = (c: Clip) => get().tracks.find((t) => t.id === c.trackId)?.kind;
+      const srcKind = kindOf(source);
+      const want = new Set(ids);
+      const fresh = (kfs: Keyframe[]) => kfs.map((k) => ({ ...k, id: uid(), split: undefined }));
+      const copyProps = (c: Clip, keys: AnimProp[]): Clip => ({
+        ...c,
+        base: { ...c.base, ...Object.fromEntries(keys.map((k) => [k, source.base[k]])) },
+        keyframes: { ...c.keyframes, ...Object.fromEntries(keys.map((k) => [k, fresh(source.keyframes[k] ?? [])])) },
+      });
+      set((s) => ({
+        clips: s.clips.map((c) => {
+          if (!want.has(c.id) || c.id === source.id || isLocked(c.trackId)) return c;
+          const kind = kindOf(c);
+          let next = c;
+          if (parts.includes("transform") && kind === "video") next = copyProps(next, ["x", "y", "scale", "rotation", "opacity"]);
+          if (parts.includes("crop") && kind === "video") next = copyProps(next, ["cropLeft", "cropRight", "cropTop", "cropBottom"]);
+          if (parts.includes("speed") && !isImage(c)) next = copyProps(next, ["speed"]);
+          if (parts.includes("volume") && kind === "audio") next = { ...copyProps(next, ["volume"]), fadeIn: source.fadeIn, fadeOut: source.fadeOut };
+          if (parts.includes("effects") && kind === srcKind) {
+            next = {
+              ...next,
+              effects: source.effects.map((fx) => ({
+                ...structuredClone(fx),
+                id: uid(),
+                keyframes: Object.fromEntries(Object.entries(fx.keyframes).map(([k, kfs]) => [k, fresh(kfs)])),
+              })),
+            };
+          }
+          if (parts.includes("color")) {
+            next = { ...next, color: source.color };
+            if (!next.color) delete next.color;
+          }
+          // Fades can't be longer than the (possibly retimed) clip.
+          const dur = clipDuration(next);
+          return { ...next, fadeIn: Math.min(next.fadeIn, dur), fadeOut: Math.min(next.fadeOut, Math.max(0, dur - next.fadeIn)) };
+        }),
+      }));
+    },
+
+    setSpeed: (ids, pct) => {
+      const want = new Set(ids);
+      set((s) => ({
+        clips: s.clips.map((c) =>
+          want.has(c.id) && !isImage(c) && !isLocked(c.trackId)
+            ? { ...c, base: { ...c.base, speed: Math.min(SPEED_MAX, Math.max(SPEED_MIN, pct)) }, keyframes: { ...c.keyframes, speed: [] } }
+            : c,
+        ),
+      }));
+    },
 
     // ---- Transport & UI ----------------------------------------------------------------------
 

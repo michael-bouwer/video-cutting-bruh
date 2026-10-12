@@ -94,6 +94,31 @@ fn encoder_args(encoder: &str, codec: &str, quality: &str) -> Vec<String> {
     a
 }
 
+/// Video encoder arguments: constant quality, or an average bitrate (kbit/s) when
+/// the file has to fit a size limit (e.g. Discord's upload cap).
+fn video_args(encoder: &str, codec: &str, quality: &str, bitrate_kbps: Option<u32>) -> Vec<String> {
+    let Some(kbps) = bitrate_kbps else {
+        return encoder_args(encoder, codec, quality);
+    };
+    let (avg, max, buf) = (format!("{kbps}k"), format!("{}k", kbps * 3 / 2), format!("{}k", kbps * 2));
+    let rate: Vec<&str> = match encoder {
+        e if e.ends_with("_nvenc") => vec!["-preset", "p5", "-rc", "vbr", "-b:v", &avg, "-maxrate", &max, "-bufsize", &buf],
+        e if e.ends_with("_amf") => vec!["-quality", "quality", "-rc", "vbr_peak", "-b:v", &avg, "-maxrate", &max],
+        e if e.ends_with("_qsv") => vec!["-preset", "medium", "-b:v", &avg, "-maxrate", &max],
+        e if e.ends_with("_videotoolbox") => vec!["-b:v", &avg],
+        "libx264" | "libx265" => vec!["-preset", "medium", "-b:v", &avg, "-maxrate", &max, "-bufsize", &buf],
+        "libsvtav1" => vec!["-preset", "8", "-b:v", &avg],
+        "libaom-av1" => vec!["-cpu-used", "6", "-b:v", &avg],
+        _ => vec!["-b:v", &avg],
+    };
+    let mut a: Vec<String> = vec!["-c:v".into(), encoder.into()];
+    a.extend(rate.into_iter().map(String::from));
+    if codec == "hevc" {
+        a.extend(["-tag:v".into(), "hvc1".into()]);
+    }
+    a
+}
+
 // ---- Audio -------------------------------------------------------------------------------
 
 fn export_temp_dir(app: &AppHandle) -> Result<PathBuf, String> {
@@ -102,22 +127,47 @@ fn export_temp_dir(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
+/// Plain file names only, so generated files stay inside their folder.
+fn safe_name(name: &str) -> Result<(), String> {
+    if name.is_empty() || name.contains(['/', '\\', ':']) || name.starts_with('.') {
+        return Err(format!("Invalid file name: {name}"));
+    }
+    Ok(())
+}
+
 /// Decodes `[start, start+duration)` of a file's audio to a 48 kHz stereo WAV the
 /// frontend can load (only the part the clip uses, so long recordings stay small).
+/// `filters` (e.g. atempo for speed changes) are applied on the way; `cmds` is an
+/// asendcmd file the filters refer to by name (`[name, contents]`).
 #[tauri::command]
-pub async fn export_audio_segment(app: AppHandle, path: String, start: f64, duration: f64) -> Result<String, String> {
+pub async fn export_audio_segment(
+    app: AppHandle,
+    path: String,
+    start: f64,
+    duration: f64,
+    filters: Option<Vec<String>>,
+    cmds: Option<(String, String)>,
+) -> Result<String, String> {
     let bin = locate("ffmpeg").ok_or("ffmpeg not found")?;
-    let out = export_temp_dir(&app)?.join(format!("seg-{}.wav", crate::cache::stable_hash(&format!("{path}|{start}|{duration}"))));
+    let dir = export_temp_dir(&app)?;
+    let filters = filters.unwrap_or_default();
+    let out = dir.join(format!("seg-{}.wav", crate::cache::stable_hash(&format!("{path}|{start}|{duration}|{filters:?}|{cmds:?}"))));
+    if let Some((name, contents)) = &cmds {
+        safe_name(name)?;
+        std::fs::write(dir.join(name), contents).map_err(|e| e.to_string())?;
+    }
     let out2 = out.clone();
     let status = tauri::async_runtime::spawn_blocking(move || {
-        command(&bin)
+        let mut cmd = command(&bin);
+        // Relative names in the filters (asendcmd files) resolve against the export folder.
+        cmd.current_dir(&dir)
             .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-ss", &format!("{start:.6}"), "-t", &format!("{duration:.6}"), "-i"])
             .arg(&path)
-            .args(["-vn", "-ac", "2", "-ar", "48000", "-c:a", "pcm_s16le"])
-            .arg(&out2)
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .output()
+            .args(["-vn", "-ac", "2", "-ar", "48000"]);
+        if !filters.is_empty() {
+            cmd.args(["-af", &filters.join(",")]);
+        }
+        cmd.args(["-c:a", "pcm_s16le"]).arg(&out2).stdout(Stdio::null()).stderr(Stdio::piped()).output()
     })
     .await
     .map_err(|e| e.to_string())?
@@ -142,10 +192,27 @@ pub async fn export_save_audio(app: AppHandle, request: tauri::ipc::Request<'_>)
     // The per-clip segments were only needed to build this mix.
     if let Ok(entries) = std::fs::read_dir(&dir) {
         for e in entries.flatten() {
-            if e.file_name().to_string_lossy().starts_with("seg-") {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if name.starts_with("seg-") || name.ends_with(".cmd") {
                 let _ = std::fs::remove_file(e.path());
             }
         }
+    }
+    Ok(path.to_string_lossy().into_owned())
+}
+
+/// Stores a PNG rendered by the frontend (text clips for the HQ export); returns its path.
+#[tauri::command]
+pub async fn export_save_png(app: AppHandle, request: tauri::ipc::Request<'_>) -> Result<String, String> {
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
+        return Err("expected PNG bytes".into());
+    };
+    let dir = export_temp_dir(&app)?.join("titles");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let hash = bytes.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ *b as u64).wrapping_mul(0x0100_0000_01b3));
+    let path = dir.join(format!("title-{hash:016x}.png"));
+    if !path.is_file() {
+        std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
     }
     Ok(path.to_string_lossy().into_owned())
 }
@@ -175,6 +242,9 @@ pub struct ExportOptions {
     codec: String,
     quality: String,
     audio_path: Option<String>,
+    /// Average video bitrate (kbit/s) instead of constant quality.
+    bitrate_kbps: Option<u32>,
+    audio_kbps: Option<u32>,
 }
 
 #[tauri::command]
@@ -197,11 +267,11 @@ pub fn export_begin(jobs: State<'_, ExportJobs>, opts: ExportOptions) -> Result<
     }
     cmd.args(["-map", "0:v:0"]);
     if opts.audio_path.is_some() {
-        cmd.args(["-map", "1:a:0", "-c:a", "aac", "-b:a", "192k"]);
+        cmd.args(["-map", "1:a:0", "-c:a", "aac", "-b:a", &format!("{}k", opts.audio_kbps.unwrap_or(192))]);
     }
     // The canvas is sRGB; tag the output as standard BT.709 SDR.
     cmd.args(["-vf", "scale=out_color_matrix=bt709:out_range=tv,format=yuv420p"])
-        .args(encoder_args(&opts.encoder, &opts.codec, &opts.quality))
+        .args(video_args(&opts.encoder, &opts.codec, &opts.quality, opts.bitrate_kbps))
         .args(["-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709"])
         .args(["-movflags", "+faststart"])
         .arg(&partial)
@@ -355,6 +425,8 @@ pub struct HqOptions {
     hdr: bool,
     /// Initialise a Vulkan device for libplacebo tone mapping.
     vulkan: bool,
+    bitrate_kbps: Option<u32>,
+    audio_kbps: Option<u32>,
 }
 
 #[derive(Serialize, Clone, Default)]
@@ -432,10 +504,10 @@ pub fn export_hq_begin(app: AppHandle, jobs: State<'_, HqJobs>, opts: HqOptions)
     }
     cmd.args(["-/filter_complex", "graph.txt", "-map", "[vout]"]);
     if opts.audio {
-        cmd.args(["-map", "[aout]", "-c:a", "aac", "-b:a", "256k"]);
+        cmd.args(["-map", "[aout]", "-c:a", "aac", "-b:a", &format!("{}k", opts.audio_kbps.unwrap_or(256))]);
     }
     cmd.args(["-t", &format!("{:.6}", opts.duration)])
-        .args(encoder_args(&opts.encoder, &opts.codec, &opts.quality));
+        .args(video_args(&opts.encoder, &opts.codec, &opts.quality, opts.bitrate_kbps));
     if opts.hdr {
         cmd.args(hdr_encoder_args(&opts.encoder));
     } else {
@@ -558,6 +630,9 @@ mod tests {
         assert!(a.windows(2).any(|w| w[0] == "-tag:v" && w[1] == "hvc1"));
         let x = encoder_args("libx264", "h264", "small");
         assert!(x.windows(2).any(|w| w[0] == "-crf" && w[1] == "27"));
+        let b = video_args("h264_nvenc", "h264", "high", Some(2000));
+        assert!(b.windows(2).any(|w| w[0] == "-b:v" && w[1] == "2000k"));
+        assert!(!b.iter().any(|x| x == "-cq"));
     }
 
     #[test]

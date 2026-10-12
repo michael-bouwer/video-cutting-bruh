@@ -1,4 +1,5 @@
 import type { Clip, Track, TrackKind } from "../types";
+import { timeMap } from "./speed";
 
 /**
  * Multi-track timeline helpers.
@@ -14,7 +15,8 @@ import type { Clip, Track, TrackKind } from "../types";
 export const TOUCH_EPS = 1 / 240;
 export const MIN_CLIP = 0.1;
 
-export const clipDuration = (c: Clip) => Math.max(0, c.trimOut - c.trimIn);
+/** Length on the timeline (the trimmed span, retimed by the clip's speed — see lib/speed.ts). */
+export const clipDuration = (c: Clip) => Math.max(0, timeMap(c).duration);
 export const clipEnd = (c: Clip) => c.start + clipDuration(c);
 
 export const timelineEnd = (clips: Clip[]) => clips.reduce((m, c) => Math.max(m, clipEnd(c)), 0);
@@ -122,11 +124,11 @@ export function fits(clips: Clip[], trackId: string, start: number, duration: nu
 }
 
 /**
- * Snaps `t` to the nearest point (clip edges on any track, the playhead, 0)
- * within `threshold` seconds. Returns the snapped value and what it snapped to.
+ * Points to snap to: clip edges on any track, the playhead, 0, plus `extra`
+ * (markers and music beats, see lib/snapExtras.ts).
  */
-export function snapPoints(clips: Clip[], exclude: Set<string>, playhead: number): number[] {
-  const pts = [0, playhead];
+export function snapPoints(clips: Clip[], exclude: Set<string>, playhead: number, extra: number[] = []): number[] {
+  const pts = [0, playhead, ...extra];
   for (const c of clips) {
     if (exclude.has(c.id)) continue;
     pts.push(c.start, clipEnd(c));
@@ -134,6 +136,7 @@ export function snapPoints(clips: Clip[], exclude: Set<string>, playhead: number
   return pts;
 }
 
+/** Snaps `t` to the nearest point within `threshold` seconds. Returns the snapped value and what it snapped to. */
 export function snap(t: number, points: number[], threshold: number): { t: number; to: number | null } {
   let best: number | null = null;
   let bestD = threshold;

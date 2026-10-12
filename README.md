@@ -48,6 +48,9 @@ A cross-platform (Windows / macOS / Linux) video editor built with Tauri 2 + Rea
   - Every keyframe gets a random colour when it's created, the same everywhere it appears (lanes, clip markers, ◆ buttons, the inspector's list). Click its swatch in the list for a new colour.
 - **Alignment toolbar** (above the preview), for the selected clip at the playhead: align left/centre/right and top/middle/bottom, plus Fit, Fill and Reset. It accounts for scale and rotation, and animated properties get a keyframe at the playhead.
 - **Export** (⤓ Export in the toolbar, File → Export video…, or Ctrl/⌘+E): renders the timeline to MP4.
+  - **Presets:** YouTube (best quality), YouTube HDR (when the timeline has HDR clips), Discord under 10 MB / Nitro under 50 MB (bitrate from the export's length; resolution and frame rate drop as needed), and Shorts / TikTok / Reels (9:16, the centre of the frame).
+  - **Range:** the whole timeline, the selected clips, between two markers, or custom start/end times.
+  - **Queue (original-files mode):** **Add to queue** snapshots the timeline and renders in the background while you keep editing. Progress, cancel and "Show in folder" are under ⏳ in the toolbar.
   - **Render mode:** **Match preview** renders every frame with the preview engine, so the output looks exactly like the preview. **Original files (HQ)** has ffmpeg render the edit straight from the source recordings: footage is only encoded once, it can output **HDR10** (HEVC/AV1, PQ, BT.2020, 10-bit; SDR clips and images are mapped into HDR), and it doesn't need the preview copies. The choice is remembered.
   - **Options:** output file; resolution (100/75/50/25% of the project); frame rate; format (H.264, HEVC or AV1, using the fastest working encoder: NVENC/AMF/QSV/VideoToolbox on the GPU, else x264/x265/SVT-AV1); quality (High/Balanced/Small); audio on/off.
   - **Match preview picture:** every frame is rendered by the preview engine at its exact time, so the output matches the preview (transitions, effects, keyframes, curves). The raw frames stream straight into ffmpeg.
@@ -56,6 +59,14 @@ A cross-platform (Windows / macOS / Linux) video editor built with Tauri 2 + Rea
   - **Match preview limits:** output is SDR (BT.709), and it renders from the preview copies, so it waits for any that are still being made.
   - **Original files (HQ):** `lib/exportHq.ts` turns the timeline into one ffmpeg filter graph. Each clip is decoded, converted to the output's colour space (HDR tone mapped with libplacebo BT.2390 like the previews, or zscale on the CPU), fitted, filtered and warped (position/scale/rotation as per-frame `perspective` expressions). Touching clips are joined with `concat`/`xfade`, and tracks are overlaid bottom-up. Animated effect parameters and opacity are driven by `sendcmd` files. Colour effects use the same CSS filter matrices as the preview. Audio is trimmed, gain-enveloped (volume keyframes × fades), processed (volume, stereotools, highpass/lowpass, bass/treble, aecho) and mixed with `amix`.
   - **HQ approximations** (listed in the dialog when they apply): transitions use ffmpeg's built-in `xfade` versions with linear timing ("Zoom out" becomes a crossfade, "Blur dissolve" uses `hblur`); animated vignette and echo use their first values; colour effects in HDR output act on HDR values.
+- **Timeline visuals:** video clips show thumbnail strips and audio clips real waveforms. Both are made in the background by ffmpeg (keyframes only, tone-mapped for HDR) and cached in the app's cache folder (`src-tauri/src/visuals.rs`, `lib/visuals.ts`). Only the visible part of each clip is drawn.
+- **Speed & speed ramps:** each video/audio clip has a Speed property (5–1600%; presets 25–400% in the inspector and the clip's right-click menu). Keyframe it for ramps, e.g. normal → 30% at the kill → normal. Speed changes the clip's length; the linked clip follows, and a clip that would run into the next one is shortened. Trims and splits work in timeline time (`lib/speed.ts` maps timeline ↔ source time). Audio keeps its pitch: `playbackRate` in the preview, `atempo` in exports.
+- **Markers:** **M** (or ⚑ Marker) drops one at the playhead, also while playing. **[ / ]** jump to the previous / next marker. Drag a flag to move it, click it to jump there, double-click it to rename it, and right-click for colour and delete. Clips snap to markers, and exports can use the range between two markers.
+- **Text clips:** **T Text** (Ctrl/⌘+T) adds one at the playhead on the highest free video track. The inspector edits the text (multi-line), font, size, colour, bold/italic, alignment, outline, shadow and background box. Position, scale, rotation, opacity, crop and effects work like on any clip.
+- **Crop:** crop left/right/top/bottom (keyframeable) under Crop in the inspector. **Zoom to crop** scales and moves the clip so the cropped area fills the frame, e.g. to zoom into a minimap or scope.
+- **Music tracks:** ♪ on an audio track header marks it as music. It's ducked (turned down, −12 dB by default; right-click ♪ for −6/−18/−24) while other audible tracks are loud, with look-ahead, quick attack and slow release, computed from the waveforms. Beats detected in its clips show as ticks and become snap points.
+- **Clip names & colour labels:** double-click a clip's name to rename it, or use the name field in the inspector. Colour labels are in the right-click menu and the inspector.
+- **Copy / paste attributes:** right-click → Copy attributes (Ctrl/⌘+Alt+C), then select clips and Paste attributes… (Ctrl/⌘+Alt+V). Choose what to paste: transform, crop, speed, effects, volume & fades, colour label.
 - **Number fields:** drag left or right on any number field to change it (Shift: faster, Alt: finer), or click it to type. Arrow keys step the value while typing. Sliders work as before.
 - **Timeline actions:** **✂ Split** cuts at the playhead: the selected clip with its linked clip, or with nothing selected, every clip under the playhead. **📷 Screenshot** saves the current preview frame (with effects, at project resolution) as a PNG and adds it to the media bin. Saved projects keep screenshots in `<project folder>/Screenshots/`.
 - **Editing:** split at the playhead (`S`): the selected clip and its link, or everything under the playhead. Duplicate (Ctrl/⌘+D), delete (Del).
@@ -113,11 +124,16 @@ The app ships its own ffmpeg and ffprobe as Tauri sidecars, so users don't need 
 - **Lookup order at runtime:** `VCB_FFMPEG_DIR`, then the app's own folder (the bundled copy), then system installs.
 - **Licence:** the bundled build is GPL, so pass on its licence and source link (https://github.com/BtbN/FFmpeg-Builds) if you distribute the app.
 
-### Installers
+### Releases and updates
 
 ```bash
-pnpm tauri build
+pnpm release "What's new"
 ```
+
+This builds the installers (`pnpm tauri build`), signs the update and writes `src-tauri/target/release/bundle/latest.json`. Create a GitHub release tagged `v<version>` and upload the `-setup.exe` and `latest.json` it lists. Installed apps check `releases/latest/download/latest.json` a few seconds after starting (and from File → Check for updates), then offer **Update & restart**.
+
+- **Signing key:** `~/.tauri/video-cutting-bruh.key`, or the `TAURI_SIGNING_PRIVATE_KEY` environment variable. Back it up: without it, existing installs can't verify new versions. The public key is in `tauri.conf.json` (`plugins.updater.pubkey`).
+- **Plain `pnpm tauri build`** needs `TAURI_SIGNING_PRIVATE_KEY` set too, because updater artifacts are enabled.
 
 The output goes to `src-tauri/target/release/bundle/`: `nsis/*-setup.exe` (about 55 MB, the one to share) and `msi/*.msi`. Bump `version` in `src-tauri/tauri.conf.json` for each release. The installers aren't code-signed, so Windows SmartScreen asks users to click "More info → Run anyway".
 

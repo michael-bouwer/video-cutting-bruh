@@ -3,7 +3,7 @@ import { isTauri } from "@tauri-apps/api/core";
 import { importFiles, importPaths } from "./lib/media";
 import { useStore } from "./store";
 import { clipDuration } from "./lib/timeline";
-import { propsFor } from "./lib/props";
+import { TRANSFORM_KEYS } from "./lib/props";
 import { keyframeNear } from "./lib/keyframes";
 import { redo, undo } from "./lib/history";
 import { newProject, openProject, saveProject } from "./lib/project";
@@ -19,6 +19,8 @@ export function openExport() {
 import { zoomToFit } from "./components/Timeline";
 import { copyKeyframes, hasCopiedKeyframes, pasteKeyframes } from "./lib/keyframeClipboard";
 import type { KeyframeRef } from "./types";
+import { addMarkerAtPlayhead, jumpToMarker } from "./components/Markers";
+import { copyAttributes, pasteAttributes, useAttributes } from "./lib/attributes";
 
 /** Ctrl+A in the lanes: extend the keyframe selection to every keyframe on the same clips. */
 function selectAllKeyframesOnSameClips() {
@@ -121,7 +123,7 @@ export function useShortcuts() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const s = useStore.getState();
-      if (s.dialog || s.newProjectDialog || s.exportOpen) return; // modals handle their own keys
+      if (s.dialog || s.newProjectDialog || s.exportOpen || useAttributes.getState().pasteTargets) return; // modals handle their own keys
       const tag = (e.target as HTMLElement | null)?.tagName;
       const typing = tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA";
       const mod = e.ctrlKey || e.metaKey;
@@ -137,6 +139,10 @@ export function useShortcuts() {
         if (key === "n") return run(newProject);
         if (key === "i") return run(openImportDialog);
         if (key === "e") return run(openExport);
+        if (!typing && key === "t") return run(() => s.addTitle());
+        // Ctrl/⌘+Alt+C / V: copy / paste clip attributes (e.code: Alt changes e.key on some layouts).
+        if (!typing && e.altKey && e.code === "KeyC") return run(() => copyAttributes());
+        if (!typing && e.altKey && e.code === "KeyV") return run(() => pasteAttributes());
         // Let text fields keep their own undo.
         if (!typing && key === "z") return run(e.shiftKey ? redo : undo);
         if (!typing && key === "y") return run(redo);
@@ -169,7 +175,7 @@ export function useShortcuts() {
           const kind = clip && s.tracks.find((t) => t.id === clip.trackId)?.kind;
           if (!clip || !kind) break;
           const local = Math.min(clipDuration(clip), Math.max(0, s.currentTime - clip.start));
-          for (const { key } of propsFor(kind)) {
+          for (const key of kind === "video" ? TRANSFORM_KEYS : (["volume"] as const)) {
             if (!keyframeNear(clip.keyframes[key], local, s.settings.fps)) s.toggleKeyframe(clip.id, key, local);
           }
           break;
@@ -215,6 +221,16 @@ export function useShortcuts() {
           break;
         case "\\":
           zoomToFit();
+          break;
+        case "m":
+        case "M":
+          addMarkerAtPlayhead();
+          break;
+        case "[":
+          jumpToMarker(-1);
+          break;
+        case "]":
+          jumpToMarker(1);
           break;
       }
     };

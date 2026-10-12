@@ -2,9 +2,12 @@ import { invoke } from "@tauri-apps/api/core";
 import type { Clip, Effect, MediaItem, Track, TransitionType } from "../types";
 import { audioGain } from "../engine/player";
 import { useStore } from "../store";
-import { even, type ExportHandle, type ExportProgress, type ExportSettings } from "./export";
+import { even, exportRange, type ExportHandle, type ExportProgress, type ExportSettings } from "./export";
 import { effectValueAt, transformAt } from "./keyframes";
 import { clipDuration, clipEnd, TOUCH_EPS, timelineEnd, trackClips, transitionLength } from "./timeline";
+import { audioTempo, hasSpeedChange, timeMap } from "./speed";
+import { titlePng } from "./titles";
+import { shiftKeyframes } from "../store";
 
 /**
  * "Original files" export: translates the timeline into one ffmpeg run that
@@ -37,6 +40,31 @@ export interface HqSettings {
   /** HDR10 output (PQ, BT.2020, 10-bit) instead of SDR BT.709. */
   hdr: boolean;
   audio: boolean;
+  /** Part of the timeline to render (default: all). */
+  range?: { start: number; end: number };
+  /** Crop the finished frame to its 9:16 centre. */
+  vertical?: boolean;
+  /** Rendered text clips: clip id → PNG path (frame-sized). */
+  titleImages?: Record<string, string>;
+}
+
+/**
+ * The clips of [start, end) as a timeline of their own starting at 0: clips
+ * crossing the edges are trimmed (speed-aware, keyframes kept in place).
+ */
+export function sliceTimeline(clips: Clip[], start: number, end: number): Clip[] {
+  const out: Clip[] = [];
+  for (const c of clips) {
+    if (clipEnd(c) <= start + 1e-9 || c.start >= end - 1e-9) continue;
+    let x = c;
+    if (clipEnd(x) > end) x = { ...x, trimOut: x.trimIn + timeMap(x).src(end - x.start) };
+    if (x.start < start) {
+      const d = start - x.start;
+      x = { ...x, start, trimIn: x.trimIn + timeMap(x).src(d), ...shiftKeyframes(x, -d) };
+    }
+    out.push({ ...x, start: x.start - start });
+  }
+  return out;
 }
 
 export interface HqPlan {
@@ -271,13 +299,16 @@ const XFADE: Record<Exclude<TransitionType, "cut">, string> = {
 // ---- Plan ------------------------------------------------------------------------------------
 
 export function buildHqPlan(
-  clips: Clip[],
+  allClips: Clip[],
   tracks: Track[],
   mediaList: MediaItem[],
   s: HqSettings,
   caps: HqCaps,
 ): HqPlan {
   const { width: W, height: H, fps, hdr } = s;
+  const range = s.range ?? { start: 0, end: timelineEnd(allClips) };
+  const original = new Map(allClips.map((c) => [c.id, c]));
+  const clips = range.start > 0 || range.end < timelineEnd(allClips) ? sliceTimeline(allClips, range.start, range.end) : allClips;
   const media = new Map(mediaList.map((m) => [m.id, m]));
   const inputs: string[][] = [];
   const files: { name: string; content: string }[] = [];
@@ -289,7 +320,7 @@ export function buildHqPlan(
   const YUVA = hdr ? "yuva444p10le" : "yuva444p";
   const OUT_MATRIX = hdr ? "bt2020" : "bt709";
   const maxv = hdr ? 1023 : 255;
-  const total = timelineEnd(clips);
+  const total = range.end - range.start;
   const totalFrames = Math.max(1, Math.ceil(total * fps - 1e-6));
   const sec = (frames: number) => num(frames / fps, 6);
   const addInput = (args: string[]) => inputs.push(args) - 1;
@@ -298,7 +329,13 @@ export function buildHqPlan(
   /** A clip as a W×H stream with alpha, `frames` long, starting `leadIn` frames before the clip. */
   const videoClip = (c: Clip, idx: number, leadIn: number, frames: number, startFrame: number): string => {
     const out = `v${idx}`;
-    const m = media.get(c.mediaId);
+    // Text clips are pre-rendered to frame-sized PNGs and used like stills.
+    const titlePath = c.title ? s.titleImages?.[c.id] : undefined;
+    const m: MediaItem | undefined = c.title
+      ? titlePath
+        ? ({ id: c.id, kind: "image", path: titlePath, status: "ready", width: W, height: H, duration: 0, probe: null } as unknown as MediaItem)
+        : undefined
+      : media.get(c.mediaId);
     if (!usable(m) || m.kind === "audio") {
       warnings.add("Some clips' files are missing or unreadable — they're left empty (transparent) in the export.");
       graph.push(`color=c=black@0:s=${W}x${H}:r=${fps}:d=${sec(frames)},format=${YUVA}[${out}]`);
@@ -317,15 +354,39 @@ export function buildHqPlan(
     if (isImage) {
       addInput(["-loop", "1", "-framerate", String(fps), "-t", sec(frames + 2), "-i", m.path]);
     } else {
-      let from = c.trimIn + localAt(0);
+      // Speed changes: source offsets ↔ clip-local timeline time (lib/speed.ts).
+      const tm = timeMap(c);
+      const local0 = localAt(0);
+      let from = c.trimIn + tm.src(local0);
+      const to = c.trimIn + tm.src(localAt(frames));
       if (from < 0) {
-        pre = Math.ceil(-from * fps - 1e-6);
+        pre = Math.ceil((tm.local(-c.trimIn) - local0) * fps - 1e-6);
         from = 0;
       }
-      const need = (frames - pre) / fps;
-      const missing = m.duration > 0 ? Math.max(0, from + need - m.duration) : 0;
-      addInput(["-an", "-sn", "-dn", "-hwaccel", "auto", "-ss", num(from, 6), "-t", num(need + 2 / fps, 6), "-i", m.path]);
-      f.push("setpts=PTS-STARTPTS", `fps=${fps}`);
+      // Frames past the end of the file (held, like the preview does).
+      const lastLocal = m.duration > 0 ? tm.local(m.duration - c.trimIn) : Infinity;
+      const missing = Math.max(0, localAt(frames) - lastLocal);
+      addInput(["-an", "-sn", "-dn", "-hwaccel", "auto", "-ss", num(from, 6), "-t", num(Math.max(0, to - from) + 4 / fps, 6), "-i", m.path]);
+      f.push("setpts=PTS-STARTPTS");
+      if (hasSpeedChange(c)) {
+        if (tm.constant) {
+          f.push(`setpts=PTS/${num(tm.speedAt(0), 6)}`);
+        } else {
+          // Source time T (from `from`) → timeline offset, as a piecewise-linear curve.
+          const o0 = from - c.trimIn;
+          const base = tm.local(o0);
+          const xs: number[] = [];
+          const ys: number[] = [];
+          const span = Math.max(0, to - from) + 4 / fps;
+          const step = Math.max(1 / (fps * 4), span / 4000);
+          for (let x = 0; x <= span + 1e-9; x += step) {
+            xs.push(x);
+            ys.push(tm.local(o0 + x) - base);
+          }
+          f.push(`setpts='(${curveExpr(xs, ys, "T", 0.25 / fps, 6)})/TB'`);
+        }
+      }
+      f.push(`fps=${fps}`);
       // Hold the first/last frame where a transition reaches past the source.
       f.push(`tpad=start=${pre}:stop=${Math.ceil(missing * fps) + 2}:start_mode=clone:stop_mode=clone`);
     }
@@ -459,8 +520,41 @@ export function buildHqPlan(
     return out;
   };
 
+  /** Crop: clears the cropped edges of the fitted picture to transparent (drawbox with replace). */
+  const cropMask = (c: Clip, f: string[], fw: number, fh: number, frames: number, localAt: (n: number) => number) => {
+    const sides = [
+      { key: "cropLeft", size: fw, box: (e: string, off: string) => `x='${off}':y=0:w='max(1,${e})':h=${fh}` },
+      { key: "cropRight", size: fw, box: (e: string) => `x='if(lt(${e},0.5),-100000,${fw}-(${e}))':y=0:w='max(1,${e})':h=${fh}` },
+      { key: "cropTop", size: fh, box: (e: string, off: string) => `x=0:y='${off}':w=${fw}:h='max(1,${e})'` },
+      { key: "cropBottom", size: fh, box: (e: string) => `x=0:y='if(lt(${e},0.5),-100000,${fh}-(${e}))':w=${fw}:h='max(1,${e})'` },
+    ] as const;
+    for (const side of sides) {
+      const kfs = c.keyframes[side.key] ?? [];
+      const px = (local: number) => (Math.min(99, Math.max(0, transformAt(c, local)[side.key])) / 100) * side.size;
+      let e: string;
+      if (kfs.length === 0) {
+        const v = px(0);
+        if (v < 0.5) continue;
+        e = num(v, 2);
+      } else {
+        const xs: number[] = [];
+        const ys: number[] = [];
+        for (let n = 0; n < frames; n++) {
+          xs.push(n / fps);
+          ys.push(px(localAt(n)));
+        }
+        if (ys.every((y) => y < 0.5)) continue;
+        e = curveExpr(xs, ys, "t", 0.5, 2);
+      }
+      // Hidden off-frame when the crop is (momentarily) zero: drawbox treats w/h 0 as "whole frame".
+      const off = `if(lt(${e},0.5),-100000,0)`;
+      f.push(`drawbox=${side.box(e, off)}:color=black@0:t=fill:replace=1`);
+    }
+  };
+
   /** Pads the fitted picture to the frame and applies position/scale/rotation. */
   const transformAndPad = (c: Clip, f: string[], fw: number, fh: number, frames: number, localAt: (n: number) => number) => {
+    cropMask(c, f, fw, fh, frames, localAt);
     const moving = ["x", "y", "scale", "rotation"].some((k) => c.keyframes[k as "x"].length > 0);
     const identity = !moving && c.base.x === 0 && c.base.y === 0 && c.base.scale === 100 && c.base.rotation === 0;
     if (identity) {
@@ -566,7 +660,9 @@ export function buildHqPlan(
   const tags = hdr
     ? "setparams=color_primaries=bt2020:color_trc=smpte2084:colorspace=bt2020nc:range=tv"
     : "setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=tv";
-  graph.push(`[${canvas}]format=${hdr ? "yuv420p10le" : "yuv420p"},${tags}[vout]`);
+  // 9:16: the centre of the finished frame, full height.
+  const reframe = s.vertical ? "crop=trunc(ih*9/32)*2:ih," : "";
+  graph.push(`[${canvas}]${reframe}format=${hdr ? "yuv420p10le" : "yuv420p"},${tags}[vout]`);
 
   // ---- Audio
   let audio = false;
@@ -581,18 +677,25 @@ export function buildHqPlan(
     audible.forEach((c, i) => {
       const m = media.get(c.mediaId)!;
       const dur = clipDuration(c);
-      const k = addInput(["-vn", "-sn", "-dn", "-ss", num(c.trimIn, 6), "-t", num(dur, 6), "-i", m.path]);
-      const f = ["aresample=48000", "aformat=sample_fmts=fltp:channel_layouts=stereo", "asetpts=PTS-STARTPTS", `apad=whole_dur=${num(dur, 6)}`, `atrim=end=${num(dur, 6)}`];
+      const k = addInput(["-vn", "-sn", "-dn", "-ss", num(c.trimIn, 6), "-t", num(c.trimOut - c.trimIn, 6), "-i", m.path]);
+      const f = ["aresample=48000", "aformat=sample_fmts=fltp:channel_layouts=stereo", "asetpts=PTS-STARTPTS"];
+      // Speed changes: atempo (pitch kept), so everything after runs in timeline time.
+      const tempo = audioTempo(c, `ta${i}`);
+      if (tempo.cmds) files.push({ name: `ta${i}.cmd`, content: tempo.cmds });
+      f.push(...tempo.filters, `apad=whole_dur=${num(dur, 6)}`, `atrim=end=${num(dur, 6)}`);
+      // Gain (volume, fades, ducking) is evaluated on the unsliced clip at its real timeline time.
+      const orig = original.get(c.id) ?? c;
+      const gainAt = (t: number) => audioGain(orig, range.start + c.start + t);
 
       // Volume keyframes × fades as a gain curve.
       const xs: number[] = [];
       const ys: number[] = [];
       for (let t = 0; t < dur; t += 0.01) {
         xs.push(t);
-        ys.push(audioGain(c, c.start + t));
+        ys.push(gainAt(t));
       }
       xs.push(dur);
-      ys.push(audioGain(c, c.start + dur));
+      ys.push(gainAt(dur));
       const env = curveExpr(xs, ys, "t", 0.002, 4);
 
       const cmds = new Commands();
@@ -672,7 +775,9 @@ export function buildHqPlan(
     });
     if (labels.length) {
       audio = true;
-      graph.push(`${labels.join("")}amix=inputs=${labels.length}:normalize=0:dropout_transition=0:duration=longest,apad[aout]`);
+      // Fresh, strictly increasing timestamps: delayed/retimed inputs can make amix's
+      // jitter backwards, which the AAC encoder rejects (silently ending the audio).
+      graph.push(`${labels.join("")}amix=inputs=${labels.length}:normalize=0:dropout_transition=0:duration=longest,apad,asetpts=N/SR/TB[aout]`);
     }
   }
 
@@ -704,23 +809,58 @@ export function hqCaps(): HqCaps {
 }
 
 /** The plan for the current timeline (also used by the dialog to list warnings). */
-export function planFor(opts: ExportSettings, hdr: boolean): HqPlan {
+export function planFor(opts: ExportSettings, hdr: boolean, titleImages?: Record<string, string>): HqPlan {
   const st = useStore.getState();
+  const total = timelineEnd(st.clips);
   return buildHqPlan(
     st.clips,
     st.tracks,
     st.media,
-    { width: even(st.settings.width * opts.scale), height: even(st.settings.height * opts.scale), fps: opts.fps, hdr, audio: opts.audio },
+    {
+      // Composited at the full frame; vertical exports crop the result.
+      width: even(st.settings.width * opts.scale),
+      height: even(st.settings.height * opts.scale),
+      fps: opts.fps,
+      hdr,
+      audio: opts.audio,
+      range: exportRange(opts, total),
+      vertical: opts.vertical,
+      // Placeholders are fine for checking the plan; real PNGs are rendered when exporting.
+      titleImages: titleImages ?? Object.fromEntries(st.clips.filter((c) => c.title).map((c) => [c.id, "title.png"])),
+    },
     hqCaps(),
   );
 }
 
-export function startHqExport(opts: ExportSettings, encoder: string, hdr: boolean, onProgress: (p: ExportProgress) => void): ExportHandle {
+/** Renders every text clip at the export's frame size and saves it as a PNG. */
+export async function renderTitles(opts: ExportSettings): Promise<Record<string, string>> {
+  const st = useStore.getState();
+  const w = even(st.settings.width * opts.scale);
+  const h = even(st.settings.height * opts.scale);
+  const out: Record<string, string> = {};
+  for (const c of st.clips) {
+    if (!c.title) continue;
+    out[c.id] = await invoke<string>("export_save_png", await titlePng(c.title, w, h));
+  }
+  return out;
+}
+
+/**
+ * Runs an original-files export. `prebuilt` is a plan made earlier (the export
+ * queue snapshots the timeline when a job is added); otherwise it's built now.
+ */
+export function startHqExport(
+  opts: ExportSettings,
+  encoder: string,
+  hdr: boolean,
+  onProgress: (p: ExportProgress) => void,
+  prebuilt?: HqPlan,
+): ExportHandle {
   let cancelled = false;
   let jobId: string | null = null;
 
   const done = (async () => {
-    const plan = planFor(opts, hdr);
+    const plan = prebuilt ?? planFor(opts, hdr, await renderTitles(opts));
     const frames = Math.round(plan.duration * opts.fps);
     onProgress({ phase: "video", frame: 0, frames, speed: 0, eta: 0 });
     jobId = await invoke<string>("export_hq_begin", {
@@ -736,6 +876,8 @@ export function startHqExport(opts: ExportSettings, encoder: string, hdr: boolea
         quality: opts.quality,
         hdr,
         vulkan: plan.vulkan,
+        bitrateKbps: opts.bitrateKbps ?? null,
+        audioKbps: opts.audioKbps ?? null,
       },
     });
     if (cancelled) await invoke("export_hq_cancel", { id: jobId });
